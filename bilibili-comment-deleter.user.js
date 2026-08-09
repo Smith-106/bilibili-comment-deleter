@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除
 // @namespace    bilibili-comment-deleter
-// @version      2.0.0
+// @version      2.0.1
 // @description  通过 AICU API 获取全部评论并批量删除，支持预览选择、进度显示、速率控制
 // @author       You
 // @match        *://*.bilibili.com/*
@@ -45,8 +45,21 @@
         responseType: 'json',
         timeout: 15000,
         onload(res) {
-          if (res.status === 200) resolve(res.response);
-          else reject(new Error(`HTTP ${res.status}`));
+          if (res.status !== 200) {
+            reject(new Error(`HTTP ${res.status}`));
+            return;
+          }
+          // 防止接口返回 HTML 错误页时解析出 null,报无法理解的错误
+          const ct = (res.responseHeaders || '').toLowerCase();
+          const notJson =
+            !ct.includes('application/json') ||
+            res.response === null ||
+            typeof res.response !== 'object';
+          if (notJson) {
+            reject(new Error('接口返回的不是 JSON(可能已失效或触发风控)'));
+            return;
+          }
+          resolve(res.response);
         },
         onerror(err) { reject(new Error('网络错误')); },
         ontimeout() { reject(new Error('请求超时')); },
@@ -55,8 +68,15 @@
   }
 
   /* ═══════════ API ═══════════ */
+  /** B 站 /x/ 接口仅在 api.bilibili.com 提供,www 域名下会返回 404 错误页 */
+  const API_HOST = 'https://api.bilibili.com';
+
   async function getUserInfo() {
-    const d = await (await fetch('/x/web-interface/nav')).json();
+    const res = await fetch(`${API_HOST}/x/web-interface/nav`, {
+      credentials: 'include',
+    });
+    if (!res.ok) throw new Error(`nav 接口 HTTP ${res.status}`);
+    const d = await res.json();
     if (d.code !== 0) throw new Error(d.message || '未登录');
     return { mid: d.data.mid, uname: d.data.uname };
   }
@@ -136,7 +156,7 @@
       csrf: getCSRF(),
     });
     const d = await (
-      await fetch('/x/v2/reply/del', {
+      await fetch(`${API_HOST}/x/v2/reply/del`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body,
