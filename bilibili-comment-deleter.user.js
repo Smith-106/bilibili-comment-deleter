@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除
 // @namespace    bilibili-comment-deleter
-// @version      2.0.0
+// @version      2.0.2
 // @description  通过 AICU API 获取全部评论并批量删除，支持预览选择、进度显示、速率控制
 // @author       You
 // @match        *://*.bilibili.com/*
@@ -16,6 +16,7 @@
 
   /* ═══════════ 常量 ═══════════ */
   const P = 'bcd'; // class/id 前缀
+  const API = 'https://api.bilibili.com'; // 官方接口只挂在 api 主机（相对路径会打到 www 等主机返回 404）
   const DELAY_DEFAULT = 400;
   const AICU_PS = 500; // AICU 每页条数
   const AICU_DELAY = 3000; // AICU 翻页延迟（避免风控）
@@ -56,7 +57,9 @@
 
   /* ═══════════ API ═══════════ */
   async function getUserInfo() {
-    const d = await (await fetch('/x/web-interface/nav')).json();
+    const d = await (
+      await fetch(`${API}/x/web-interface/nav`, { credentials: 'include' })
+    ).json();
     if (d.code !== 0) throw new Error(d.message || '未登录');
     return { mid: d.data.mid, uname: d.data.uname };
   }
@@ -136,7 +139,7 @@
       csrf: getCSRF(),
     });
     const d = await (
-      await fetch('/x/v2/reply/del', {
+      await fetch(`${API}/x/v2/reply/del`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body,
@@ -285,6 +288,7 @@
         <div class="${P}-row">
           <button class="${P}-btn ${P}-btn-d" id="${P}-dsel" disabled>🔥 删除选中</button>
           <button class="${P}-btn ${P}-btn-d" id="${P}-dall" disabled>💣 删除全部</button>
+          <button class="${P}-btn ${P}-btn-d" id="${P}-dunsel" disabled>💥 删除未选中</button>
         </div>
       </div>
 
@@ -311,10 +315,16 @@
     };
     $(`#${P}-close`).onclick = () => (panel.style.display = 'none');
     $(`#${P}-load`).onclick = loadComments;
-    $(`#${P}-dsel`).onclick = () => startDelete(false);
+    $(`#${P}-dsel`).onclick = () => startDelete('sel');
     $(`#${P}-dall`).onclick = () => {
       if (!confirm(`确认删除全部 ${comments.length} 条评论？此操作不可撤销！`)) return;
-      startDelete(true);
+      startDelete('all');
+    };
+    $(`#${P}-dunsel`).onclick = () => {
+      const n = comments.length - selected.size;
+      if (n <= 0) return;
+      if (!confirm(`确认删除未选中的 ${n} 条评论？此操作不可撤销！`)) return;
+      startDelete('unsel');
     };
     $(`#${P}-stop`).onclick = () => {
       aborted = true;
@@ -357,6 +367,7 @@
     $(`#${P}-cnt`).textContent = `${selected.size}/${comments.length} 条`;
     $(`#${P}-dsel`).disabled = !selected.size || deleting;
     $(`#${P}-dall`).disabled = !comments.length || deleting;
+    $(`#${P}-dunsel`).disabled = !comments.length || deleting || selected.size === comments.length;
   }
 
   function onSelAll() {
@@ -402,6 +413,7 @@
     $(`#${P}-load`).disabled = locked;
     $(`#${P}-dsel`).disabled = locked;
     $(`#${P}-dall`).disabled = locked;
+    $(`#${P}-dunsel`).disabled = locked;
   }
 
   /* ═══════════ 控制器：通过 AICU 获取全部评论 ═══════════ */
@@ -438,10 +450,13 @@
   }
 
   /* ═══════════ 控制器：删除评论 ═══════════ */
-  async function startDelete(all) {
-    const targets = all
-      ? [...comments]
-      : comments.filter((c) => selected.has(c.rpid));
+  async function startDelete(mode) {
+    const targets =
+      mode === 'all'
+        ? [...comments]
+        : mode === 'unsel'
+        ? comments.filter((c) => !selected.has(c.rpid))
+        : comments.filter((c) => selected.has(c.rpid));
     if (!targets.length) {
       log('没有可删除的评论', 'warn');
       return;
@@ -452,9 +467,10 @@
     stats = { ok: 0, fail: 0 };
     const delay = parseInt($(`#${P}-delay`).value) || DELAY_DEFAULT;
 
+    const modeName = mode === 'all' ? '全部' : mode === 'unsel' ? '未选中' : '选中';
     lockBtns(true);
     showProg(true);
-    log(`🔥 开始删除 ${targets.length} 条，间隔 ${delay}ms`, 'warn');
+    log(`🔥 开始删除${modeName} ${targets.length} 条，间隔 ${delay}ms`, 'warn');
 
     for (let i = 0; i < targets.length; i++) {
       if (aborted) {
