@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         B站评论批量删除
 // @namespace    bilibili-comment-deleter
-// @version      2.0.0
+// @version      2.0.1
 // @description  通过 AICU API 获取全部评论并批量删除，支持预览选择、进度显示、速率控制
 // @author       You
 // @match        *://*.bilibili.com/*
 // @grant        GM_xmlhttpRequest
 // @connect      api.aicu.cc
 // @connect      apibackup2.aicu.cc
+// @connect      api.bilibili.com
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -36,27 +37,41 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const getCSRF = () => document.cookie.match(/bili_jct=([^;]+)/)?.[1] || '';
 
-  /** 跨域 GET 请求（用于 AICU API） */
-  function gmFetch(url) {
+  /** 跨域请求并解析 JSON；若对方返回 HTML（404 / Cloudflare），给出明确错误 */
+  function gmRequest(url, { method = 'GET', body, headers } = {}) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
-        method: 'GET',
+        method,
         url,
-        responseType: 'json',
+        data: body,
+        headers: headers || {},
         timeout: 15000,
         onload(res) {
-          if (res.status === 200) resolve(res.response);
-          else reject(new Error(`HTTP ${res.status}`));
+          const text = res.responseText || '';
+          let data;
+          try {
+            data = JSON.parse(text);
+          } catch {
+            reject(new Error(`接口返回了非 JSON（HTTP ${res.status}）`));
+            return;
+          }
+          if (res.status >= 200 && res.status < 300) resolve(data);
+          else reject(new Error(data.message || `HTTP ${res.status}`));
         },
-        onerror(err) { reject(new Error('网络错误')); },
+        onerror() { reject(new Error('网络错误')); },
         ontimeout() { reject(new Error('请求超时')); },
       });
     });
   }
 
+  const gmFetch = (url) => gmRequest(url);
+  const BILI_HDR = { Referer: 'https://www.bilibili.com/' };
+
   /* ═══════════ API ═══════════ */
   async function getUserInfo() {
-    const d = await (await fetch('/x/web-interface/nav')).json();
+    const d = await gmRequest('https://api.bilibili.com/x/web-interface/nav', {
+      headers: BILI_HDR,
+    });
     if (d.code !== 0) throw new Error(d.message || '未登录');
     return { mid: d.data.mid, uname: d.data.uname };
   }
@@ -135,14 +150,14 @@
       rpid: String(rpid),
       csrf: getCSRF(),
     });
-    const d = await (
-      await fetch('/x/v2/reply/del', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body,
-        credentials: 'include',
-      })
-    ).json();
+    const d = await gmRequest('https://api.bilibili.com/x/v2/reply/del', {
+      method: 'POST',
+      headers: {
+        ...BILI_HDR,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: body.toString(),
+    });
     if (d.code !== 0) throw new Error(d.message || `code:${d.code}`);
   }
 
