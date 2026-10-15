@@ -1,13 +1,15 @@
 // ==UserScript==
-// @name         B站评论批量删除
+// @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.0.0
-// @description  通过 AICU API 获取全部评论并批量删除，支持预览选择、进度显示、速率控制
-// @author       You
+// @version      2.2.1
+// @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 全区/整楼 可判定回查 + 统一请求层（串行化/自动重试/412识别）+ 处理日志持久化 + 过滤排序导出 + 明暗主题
+// @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
+// @license      MIT
 // @match        *://*.bilibili.com/*
 // @grant        GM_xmlhttpRequest
 // @connect      api.aicu.cc
 // @connect      apibackup2.aicu.cc
+// @connect      api.bilibili.com
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -15,69 +17,221 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const P = 'bcd'; // class/id 前缀
-  const DELAY_DEFAULT = 400;
-  const AICU_PS = 500; // AICU 每页条数
-  const AICU_DELAY = 3000; // AICU 翻页延迟（避免风控）
+  const VERSION = '2.2.1';
+  const P = 'bcd22';                  // DOM 前缀
+  const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
+  const AICU_PS = 500;                // AICU 每页条数
+  const AICU_DELAY = 3000;            // AICU 翻页延迟（防风控）
   const AICU_APIS = [
     'https://api.aicu.cc/api/v3/search/getreply',
     'https://apibackup2.aicu.cc:88/api/v3/search/getreply',
   ];
+  const DELETE_MAX_RETRY = 4;         // -509 限流重试上限（含首次）
+  const HISTORY_PS = 20;              // 官方历史每页条数
+  const HISTORY_VIDEO_CAP = 200;      // 官方历史扫描视频数上限
+  const HISTORY_VIDEO_DELAY = 1000;   // 逐视频扫描间隔
+  const VIDEO_SCAN_PAGES_DEFAULT = 2; // 每视频扫描评论页数（时间序）
+  const RENDER_CHUNK = 150;           // 列表增量渲染块大小
+  const JOURNAL_CAP = 2000;           // 本地处理日志上限
+  const TYPE_TEXT = { 1: '视频', 11: '番剧', 12: '专栏', 17: '动态', 21: '直播' };
+  const ERR_TEXT = {
+    '-101': '未登录',
+    '-111': 'CSRF 校验失败（刷新页面）',
+    '-404': '评论不存在或 oid/type 不匹配',
+    '-412': '被风控拦截（换网络/降速）',
+    '-509': '频率限制',
+    '12022': '评论原本就不存在',
+  };
+  const SRC_TEXT = { aicu: 'aicu', history: '官方历史', import: '导入', manual: '回查' };
 
   /* ═══════════ 状态 ═══════════ */
-  let comments = [];
+  let comments = [];                  // {rpid, oid, type, message, ctime, root, src}
+  const rpidSet = new Set();          // O(1) 去重索引
+  let datasetUid = '';                // 枚举时所属 UID（防换号误解）
   let selected = new Set();
+  let filterKw = '';                  // 关键词
+  let filtSrc = 'all';
+  let filtType = 'all';
+  let sortMode = 'default';           // default | tasc | tdesc
+  let fetching = false;
   let deleting = false;
   let aborted = false;
-  let stats = { ok: 0, fail: 0 };
+  let batchResults = null;            // Map(rpid → 'ok'|'uncertain'|'fail')，最近一次批次
+  let recheckCache = null;            // Map('oid:type' → {map, complete})  区域全量walk缓存（批次内）
+  let threadCache = null;             // Map('oid:type:root' → {set, complete}) 楼层全量walk缓存（批次内）
+  const bvidCache = {};
 
-  /* ═══════════ 工具 ═══════════ */
-  const $ = (s) => document.querySelector(s);
+  /* ═══════════ 基础工具 ═══════════ */
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const getCSRF = () => document.cookie.match(/bili_jct=([^;]+)/)?.[1] || '';
 
-  /** 跨域 GET 请求（用于 AICU API） */
-  function gmFetch(url) {
+  function getCookie(name) {
+    // 某些特殊文档（about: 等）对 cookie 属性直接抛 SecurityError（冒烟测试实测），必须兜住
+    let raw = '';
+    try { raw = document.cookie; } catch (e) { return ''; }
+    const m = raw.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]*)'));
+    if (!m) return '';
+    try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; }
+  }
+
+  function fmtTime(t) {
+    if (!t) return '';
+    const d = new Date(Number(t) * 1000);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  function typeText(t) { return TYPE_TEXT[t] || ('类型' + t); }
+
+  /* ═══════════ 统一请求层 ═══════════
+   * - 按 host 串行化（杜绝并发打同一接口）
+   * - GET 自动重试：网络错误 / 5xx / 412 / 429 → 指数退避 + 抖动
+   * - B站响应 code=-412 视为风控抛错
+   */
+  const hostChains = new Map();
+
+  function hostOf(u) { try { return new URL(u).host; } catch (e) { return 'default'; } }
+
+  function serialized(host, fn) {
+    const prev = hostChains.get(host) || Promise.resolve();
+    const p = prev.then(fn);
+    hostChains.set(host, p.catch(() => {})); // 断链保护：错误不阻塞后续
+    return p;
+  }
+
+  function gmXhr(opts) {
     return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
-        method: 'GET',
-        url,
-        responseType: 'json',
-        timeout: 15000,
-        onload(res) {
-          if (res.status === 200) resolve(res.response);
-          else reject(new Error(`HTTP ${res.status}`));
-        },
-        onerror(err) { reject(new Error('网络错误')); },
-        ontimeout() { reject(new Error('请求超时')); },
-      });
+      GM_xmlhttpRequest(Object.assign({}, opts, {
+        onload: (r) => resolve(r),
+        onerror: () => reject(new Error('网络错误')),
+        ontimeout: () => reject(new Error('请求超时')),
+        onabort: () => reject(new Error('请求中止')),
+      }));
     });
   }
 
-  /* ═══════════ API ═══════════ */
-  async function getUserInfo() {
-    const d = await (await fetch('/x/web-interface/nav')).json();
-    if (d.code !== 0) throw new Error(d.message || '未登录');
-    return { mid: d.data.mid, uname: d.data.uname };
+  function parseJsonRes(r) {
+    let j = r.response;
+    if (j == null || typeof j === 'string') {
+      try { j = JSON.parse(r.responseText); }
+      catch (e) { throw new Error('非 JSON 响应 (HTTP ' + r.status + ')'); }
+    }
+    return j;
   }
 
-  /** 从 AICU API 获取用户的全部评论 */
+  const RETRYABLE_HTTP = (s) => s === 412 || s === 429 || (s >= 500 && s < 600 && s !== 509);
+
+  async function gmGetJSON(url, { timeoutMs = 20000, retries = 2 } = {}) {
+    for (let i = 0; ; i++) {
+      let r;
+      try {
+        r = await serialized(hostOf(url), () => gmXhr({ method: 'GET', url, timeout: timeoutMs }));
+        if (RETRYABLE_HTTP(r.status)) {
+          if (i >= retries) throw new Error(`HTTP ${r.status}（重试 ${retries} 次后仍失败）`);
+          await sleep(700 * Math.pow(2, i) + Math.random() * 400);
+          continue;
+        }
+        const j = parseJsonRes(r);
+        if (j && typeof j === 'object' && j.code === -412 && hostOf(url).includes('bilibili.com')) {
+          throw new Error('B站风控(-412)，请降速或换网络');
+        }
+        return j;
+      } catch (e) {
+        if (i >= retries) throw e;
+        await sleep(700 * Math.pow(2, i) + Math.random() * 400);
+      }
+    }
+  }
+
+  async function gmPostForm(url, body, timeoutMs = 15000) {
+    const r = await serialized(hostOf(url), () => gmXhr({
+      method: 'POST',
+      url,
+      data: body,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: timeoutMs,
+    }));
+    let j;
+    try { j = parseJsonRes(r); }
+    catch (e) { j = { code: -1, message: ((r && r.responseText) || '空响应').slice(0, 120) }; }
+    return j;
+  }
+
+  /* ═══════════ 处理日志（localStorage 持久化） ═══════════ */
+  const JKEY = `${P}_journal`;
+  let journalMapCache = null;
+
+  function journalLoad() {
+    try { return JSON.parse(localStorage.getItem(JKEY) || '[]'); } catch (e) { return []; }
+  }
+  function journalMap() {
+    if (journalMapCache) return journalMapCache;
+    journalMapCache = new Map(journalLoad().map((e) => [Number(e.rpid), e.state]));
+    return journalMapCache;
+  }
+  function journalAdd(rpid, state) {
+    try {
+      let j = journalLoad();
+      j.unshift({ rpid: Number(rpid), state, t: Date.now() });
+      localStorage.setItem(JKEY, JSON.stringify(j.slice(0, JOURNAL_CAP)));
+      journalMapCache = null;
+    } catch (e) { /* 容量满等原因，忽略 */ }
+  }
+
+  /* ═══════════ 数据层 ═══════════ */
+  function addIfAbsent(item) {
+    if (!item) return false;
+    if (rpidSet.has(item.rpid)) return false;
+    if (!item.rpid || !item.oid || !item.type) return false;
+    comments.push(item);
+    rpidSet.add(item.rpid);
+    return true;
+  }
+
+  function resetDataset() {
+    comments = [];
+    rpidSet.clear();
+    selected.clear();
+    datasetUid = '';
+    batchResults = null;
+    filterKw = ''; filtSrc = 'all'; filtType = 'all'; sortMode = 'default';
+    const rb = document.getElementById(`${P}-retry`);
+    if (rb) rb.style.display = 'none';
+    renderList(); updCount();
+  }
+
+  /** aicu 导出条目 / 单页原始 JSON 条目 → 规范对象 */
+  function mapAicuReply(it) {
+    const rpid = Number(it && it.rpid);
+    const dyn = (it && it.dyn) || {};
+    const oid = Number(dyn.oid);
+    const type = Number(dyn.type);
+    if (!rpid || !oid || !type) return null;
+    return {
+      rpid,
+      oid,
+      type,
+      message: (it.message || '').slice(0, 200),
+      ctime: it.time || 0,
+      root: (it.parent && it.parent.rootid) ? Number(it.parent.rootid) : 0,
+      src: 'aicu',
+    };
+  }
+
+  /* ═══════════ 枚举一：AICU 自动拉取 ═══════════ */
   async function fetchAicuComments(uid) {
     let page = 1;
-    let totalCount = 0;
     let aicuUrl = AICU_APIS[0];
+    let total = 0;
 
     while (true) {
       if (aborted) break;
-
-      const url = `${aicuUrl}?uid=${uid}&pn=${page}&ps=${AICU_PS}&mode=0`;
+      const url = `${aicuUrl}?uid=${encodeURIComponent(uid)}&pn=${page}&ps=${AICU_PS}&mode=0`;
       let data;
       try {
-        data = await gmFetch(url);
+        data = await gmGetJSON(url, { timeoutMs: 20000, retries: 1 });
       } catch (e) {
-        // 主 API 失败，尝试备用
         if (aicuUrl === AICU_APIS[0]) {
-          log('AICU 主接口失败，尝试备用...', 'warn');
+          log(`主接口失败（${e.message}），切换备用…`, 'warn');
           aicuUrl = AICU_APIS[1];
           continue;
         }
@@ -85,418 +239,964 @@
       }
 
       if (data.code !== 0) {
+        if (aicuUrl === AICU_APIS[0]) {
+          log(`主接口返回 code=${data.code}，切换备用…`, 'warn');
+          aicuUrl = AICU_APIS[1];
+          continue;
+        }
         log(`AICU 错误: ${data.message || data.code}`, 'err');
         break;
       }
 
-      const replies = data.data?.replies || [];
       if (page === 1) {
-        totalCount = data.data?.cursor?.all_count || 0;
-        log(`AICU 共收录 ${totalCount} 条评论`, 'info');
+        total = (data.data && data.data.cursor && data.data.cursor.all_count) || 0;
+        log(total ? `AICU 索引共 ${total} 条，开始拉取` : 'AICU 未给出总数，开始拉取');
       }
 
-      if (!replies.length) {
-        log('AICU 数据已全部获取', 'info');
-        break;
+      const replies = (data.data && data.data.replies) || [];
+      if (!replies.length) { log('AICU 数据已全部获取'); break; }
+
+      let added = 0;
+      for (const it of replies) {
+        if (addIfAbsent(mapAicuReply(it))) added++;
       }
+      log(`第 ${page} 页: +${added} 条（累计 ${comments.length}${total ? '/' + total : ''}）`, 'info');
 
-      for (const item of replies) {
-        const rpid = Number(item.rpid);
-        if (!rpid) continue;
-        if (comments.some((c) => c.rpid === rpid)) continue;
-
-        const dyn = item.dyn || {};
-        const oid = Number(dyn.oid);
-        const type = Number(dyn.type);
-        if (!oid || !type) continue;
-
-        comments.push({
-          rpid,
-          oid,
-          type,
-          message: (item.message || '').slice(0, 200),
-          ctime: item.time,
-        });
-      }
-
-      log(`第 ${page} 页: +${replies.length} 条 (累计 ${comments.length}/${totalCount})`, 'info');
-
-      if (data.data?.cursor?.is_end) break;
-
+      if (data.data && data.data.cursor && data.data.cursor.is_end) break;
       page++;
       await sleep(AICU_DELAY);
     }
   }
 
-  async function delComment(type, oid, rpid) {
-    const body = new URLSearchParams({
-      type: String(type),
-      oid: String(oid),
-      rpid: String(rpid),
-      csrf: getCSRF(),
-    });
-    const d = await (
-      await fetch('/x/v2/reply/del', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body,
-        credentials: 'include',
-      })
-    ).json();
-    if (d.code !== 0) throw new Error(d.message || `code:${d.code}`);
+  /* ═══════════ 枚举二：官方观看历史兜底（纯官方，仅视频评论） ═══════════ */
+  async function fetchHistoryComments(myUid, scanPages) {
+    const mid = Number(myUid);
+    const aids = [];
+    let cursorMax = 0;
+    let viewAt = 0;
+    const seenAids = new Set();
+    let guard = 0;
+
+    while (seenAids.size < HISTORY_VIDEO_CAP && guard < 400) {
+      guard++;
+      if (aborted) break;
+      const url = `https://api.bilibili.com/x/web-interface/history/cursor?type=archive&ps=${HISTORY_PS}&max=${cursorMax}&view_at=${viewAt}`;
+      let data;
+      try { data = await gmGetJSON(url); }
+      catch (e) { log(`历史翻页失败: ${e.message}`, 'err'); break; }
+      if (data.code !== 0) { log(`历史接口错误: ${data.message || data.code}`, 'err'); break; }
+
+      const list = (data.data && data.data.list) || [];
+      if (!list.length) break;
+      for (const it of list) {
+        const h = (it.history || {});
+        if (h.aid && !seenAids.has(h.aid)) { seenAids.add(h.aid); aids.push(h.aid); }
+      }
+      const c = (data.data && data.data.cursor) || {};
+      if (typeof c.max !== 'number' || typeof c.view_at !== 'number') break;
+      cursorMax = c.max; viewAt = c.view_at;
+      await sleep(800);
+    }
+
+    log(`观看历史共 ${seenAids.size} 个视频，逐个扫描（每视频 ${scanPages} 页，时间序）…`);
+    for (const aid of aids) {
+      if (aborted) break;
+      try { await fetchOwnRepliesFromVideo(aid, mid, scanPages); }
+      catch (e) { log(`视频 ${aid} 扫描失败: ${e.message}`, 'warn'); }
+      await sleep(HISTORY_VIDEO_DELAY);
+    }
+    log(`官方历史扫描结束，本来源新增 ${comments.filter((c) => c.src === 'history').length} 条`, 'ok');
   }
 
-  /* ═══════════ 样式 ═══════════ */
+  async function fetchOwnRepliesFromVideo(aid, mid, scanPages) {
+    let nextPage = 0;
+    let guard = 0;
+    while (guard < scanPages) {
+      guard++;
+      if (aborted) return;
+      const d = await gmGetJSON(`https://api.bilibili.com/x/v2/reply/main?type=1&oid=${aid}&mode=2&next=${nextPage}`);
+      if (d.code !== 0) return;
+      let added = 0;
+      const tops = (d.data && d.data.replies) || [];
+      for (const top of tops) {
+        const pool = [top].concat(Array.isArray(top.replies) ? top.replies : []);
+        for (const r of pool) {
+          if (Number(r.mid) === mid) {
+            const item = {
+              rpid: Number(r.rpid),
+              oid: aid,
+              type: 1,
+              message: ((r.content && r.content.message) || '').slice(0, 200),
+              ctime: r.ctime || 0,
+              root: 0,
+              src: 'history',
+            };
+            if (addIfAbsent(item)) added++;
+          }
+        }
+      }
+      log(`  aid=${aid} 第${guard}页 +${added}`, 'info');
+      const c = (d.data && d.data.cursor) || {};
+      if (c.is_end) break;
+      if (typeof c.next !== 'number' || c.next === nextPage) break;
+      nextPage = c.next;
+      await sleep(500);
+    }
+  }
+
+  /* ═══════════ 枚举三：离线 JSON 导入 ═══════════ */
+  function importJson(raw) {
+    let data;
+    try { data = JSON.parse(raw); }
+    catch (e) { return { ok: false, msg: 'JSON 解析失败：' + e.message }; }
+
+    let replies = null;
+    if (Array.isArray(data)) replies = data;
+    else if (Array.isArray(data.replies)) replies = data.replies;
+    else if (data.data && Array.isArray(data.data.replies)) replies = data.data.replies;
+    if (!replies) return { ok: false, msg: '未识别的结构：需要 replies 数组（aicu 导出 / 原始单页 JSON / 裸数组）' };
+
+    let added = 0, skipped = 0;
+    for (const it of replies) {
+      const item = mapAicuReply(it);
+      if (item) item.src = 'import';   // 与 aicu 枚举区分来源（冒烟测试抓到的标注 bug）
+      if (item && addIfAbsent(item)) added++; else skipped++;
+    }
+    return { ok: true, msg: `导入完成：新增 ${added}，跳过 ${skipped}（无效/重复）` };
+  }
+
+  /* ═══════════ 删除 + 回查 ═══════════ */
+  async function doDelete(c, csrf) {
+    const attempt = async (withRoot) => {
+      let url = 'https://api.bilibili.com/x/v2/reply/del';
+      let body = `oid=${c.oid}&type=${c.type}&rpid=${c.rpid}`;
+      // 番剧区（type=11）csrf 需走 query（naaammme/bilibili-tools 佐证的官方遗留行为）
+      if (c.type === 11) url += `?csrf=${encodeURIComponent(csrf)}`;
+      else body += `&csrf=${encodeURIComponent(csrf)}`;
+      if (withRoot && c.root) body += `&root=${encodeURIComponent(c.root)}`;
+      return gmPostForm(url, body);
+    };
+    let j = await attempt(!!c.root);
+    if (j.code === -404 && c.root) {
+      log(`↳ 带 root 报 -404，去掉 root 重试 rpid=${c.rpid}`, 'warn');
+      j = await attempt(false);
+    }
+    return j;
+  }
+
+  /* ═══════════ 回查：区域/楼层全量 walk（可判定版 v2.2.1） ═══════════
+   * 旧版逐条扫前 N 页内联预览 → 深层楼中楼、按热度沉底的老顶评永远"待确认"。
+   * 新策略（结果按批次缓存，删除只会移除条目，缓存不失效）：
+   *   顶评（root=0）→ /x/v2/reply/main 游标全区走完，在/不在即结论
+   *   楼中楼（root>0）→ 全区 walk 找根楼：楼没了→子评必然没了；
+   *                    楼在 → /x/v2/reply/reply 楼内全量翻页判定 */
+  const RECHECK_TOP_MAX = 200;      // 区域顶评 walk 页数上限（游标制）
+  const RECHECK_SUB_PS = 49;        // 楼内每页条数（官方页面大小）
+  const RECHECK_SUB_MAX = 60;       // 楼内最多翻页数
+  const RECHECK_WALK_DELAY = 250;   // walk 翻页间隔
+
+  /** 全量走完一个评论区：{map: Map(rpid→rootStr|''), complete, pages} */
+  async function walkArea(oid, type) {
+    const key = `${oid}:${type}`;
+    if (recheckCache.has(key)) return recheckCache.get(key);
+    const map = new Map();
+    let complete = false, pages = 0, next = 0;
+    for (let guard = 0; guard < RECHECK_TOP_MAX && !aborted; guard++) {
+      let d;
+      try {
+        d = await gmGetJSON(`https://api.bilibili.com/x/v2/reply/main?type=${type}&oid=${oid}&mode=2&next=${next}`, { retries: 1 });
+      } catch (e) { log(`回查 walk 失败 oid=${oid}: ${e.message}`, 'warn'); break; }
+      if (d.code !== 0) { log(`回查 walk code=${d.code} oid=${oid} type=${type}`, 'warn'); break; }
+      pages++;
+      for (const top of ((d.data && d.data.replies) || [])) {
+        map.set(String(top.rpid), '');
+        if (Array.isArray(top.replies)) for (const s of top.replies) map.set(String(s.rpid), String(top.rpid));
+      }
+      const c = (d.data && d.data.cursor) || {};
+      if (c.is_end || typeof c.next !== 'number' || c.next === next) { complete = true; break; }
+      next = c.next;
+      await sleep(RECHECK_WALK_DELAY);
+    }
+    const res = { map, complete, pages };
+    recheckCache.set(key, res);
+    return res;
+  }
+
+  /** 全量走完楼中楼根楼层下的全部子回复：{set:Set(rpidStr), complete} */
+  async function walkThread(oid, type, root) {
+    const key = `${oid}:${type}:${root}`;
+    if (threadCache.has(key)) return threadCache.get(key);
+    const set = new Set();
+    let complete = false;
+    for (let pn = 1; pn <= RECHECK_SUB_MAX && !aborted; pn++) {
+      let d;
+      try {
+        d = await gmGetJSON(`https://api.bilibili.com/x/v2/reply/reply?type=${type}&oid=${oid}&root=${root}&pn=${pn}&ps=${RECHECK_SUB_PS}`, { retries: 1 });
+      } catch (e) { log(`楼层 walk 失败 root=${root}: ${e.message}`, 'warn'); break; }
+      if (d.code !== 0) { log(`楼层 walk code=${d.code} root=${root}`, 'warn'); break; }
+      const rs = (d.data && d.data.replies) || [];
+      for (const r of rs) set.add(String(r.rpid));
+      const count = d.data && d.data.page && d.data.page.count;
+      if ((typeof count === 'number' && pn * RECHECK_SUB_PS >= count) || rs.length < RECHECK_SUB_PS) { complete = true; break; }
+      await sleep(RECHECK_WALK_DELAY);
+    }
+    const res = { set, complete };
+    threadCache.set(key, res);
+    return res;
+  }
+
+  /** 可判定回查：{state:'ok'|'fail'|'uncertain', why}；接口不可用返回 null（按待确认处理） */
+  async function recheckDefinitive(c) {
+    const area = await walkArea(c.oid, c.type);
+    if (area.map.has(String(c.rpid))) {
+      return { state: 'fail', why: area.map.get(String(c.rpid)) ? '楼中楼内联预览仍在' : '顶评仍在' };
+    }
+    if (c.root) {
+      if (!area.map.has(String(c.root))) return { state: 'ok', why: '根楼层已不存在，子评必然已删' };
+      const th = await walkThread(c.oid, c.type, c.root);
+      if (th.set.has(String(c.rpid))) return { state: 'fail', why: '楼内仍在' };
+      if (!th.complete) return { state: 'uncertain', why: `楼内翻页未走完(≤${RECHECK_SUB_MAX}页)` };
+      return { state: 'ok', why: `整楼未发现(根=${c.root})` };
+    }
+    if (!area.complete) return { state: 'uncertain', why: `区域翻页未走完(≤${RECHECK_TOP_MAX}页)` };
+    return { state: 'ok', why: `全区未发现(${area.pages}页)` };
+  }
+
+  /* ═══════════ 跳转定位 ═══════════ */
+  async function aidToBvid(aid) {
+    if (bvidCache[aid]) return bvidCache[aid];
+    try {
+      const d = await gmGetJSON(`https://api.bilibili.com/x/web-interface/view?aid=${encodeURIComponent(aid)}`);
+      const bv = d && d.data && d.data.bvid ? d.data.bvid : null;
+      bvidCache[aid] = bv;
+      return bv;
+    } catch (e) { return null; }
+  }
+
+  async function jumpTo(c) {
+    if (!c.oid) { alert('该评论缺少 oid，无法跳转'); return; }
+    let url = null;
+    if (c.type === 1) {
+      const bv = await aidToBvid(c.oid);
+      url = bv ? `https://www.bilibili.com/video/${bv}#reply${c.rpid}`
+               : `https://www.bilibili.com/video/av${c.oid}#reply${c.rpid}`;
+    } else if (c.type === 17) {
+      url = `https://t.bilibili.com/${c.oid}#reply${c.rpid}`;
+    } else if (c.type === 12) {
+      url = `https://www.bilibili.com/read/cv${c.oid}#reply${c.rpid}`;
+    }
+    if (url) window.open(url, '_blank');
+    else alert(`暂不支持 ${typeText(c.type)} 的跳转（oid=${c.oid}）`);
+  }
+
+  /* ═══════════ 导出备份 ═══════════ */
+  function csvCell(s) {
+    s = String(s == null ? '' : s);
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+
+  function doExport(kind) {
+    const list = visibleComments();
+    if (!list.length) { setStatus('当前筛选下没有数据可导出。'); return; }
+    let blob, name;
+    if (kind === 'json') {
+      blob = new Blob([JSON.stringify(list, null, 2)], { type: 'application/json' });
+      name = `bili-comments-${Date.now()}.json`;
+    } else {
+      const head = 'rpid,oid,type,typeText,message,ctime,ctimeText,root,src';
+      const rows = list.map((c) =>
+        [c.rpid, c.oid, c.type, typeText(c.type), c.message, c.ctime, fmtTime(c.ctime), c.root, SRC_TEXT[c.src] || c.src].map(csvCell).join(',')
+      ).join('\r\n');
+      blob = new Blob(['\ufeff' + head + '\r\n' + rows], { type: 'text/csv;charset=utf-8' });
+      name = `bili-comments-${Date.now()}.csv`;
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+    log(`已导出 ${list.length} 条（${kind.toUpperCase()}）`, 'ok');
+  }
+
+  /* ═══════════ 样式（明暗双主题，CSS 变量） ═══════════ */
   function injectCSS() {
     const s = document.createElement('style');
     s.textContent = `
-      #${P}-toggle {
-        position:fixed; bottom:80px; right:24px; z-index:999999;
-        width:48px; height:48px; border-radius:50%; border:none;
-        background:#00a1d6; color:#fff; font-size:22px; cursor:pointer;
-        box-shadow:0 2px 14px rgba(0,0,0,.35);
-        display:flex; align-items:center; justify-content:center;
-        transition:transform .2s, box-shadow .2s;
-        user-select:none;
-      }
-      #${P}-toggle:hover { transform:scale(1.12); box-shadow:0 4px 20px rgba(0,161,214,.45); }
+      #${P}-toggle{position:fixed;bottom:80px;right:24px;z-index:999999;width:48px;height:48px;
+        border-radius:50%;border:none;background:#00a1d6;color:#fff;font-size:22px;cursor:pointer;
+        box-shadow:0 2px 14px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;
+        user-select:none;transition:transform .2s}
+      #${P}-toggle:hover{transform:scale(1.12)}
 
-      #${P}-panel {
-        position:fixed; top:50%; right:24px; transform:translateY(-50%);
-        width:460px; max-height:82vh; z-index:999998;
-        background:#1e1e2e; border-radius:14px;
-        box-shadow:0 10px 40px rgba(0,0,0,.55);
-        color:#e0e0e0; font:13px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-        display:flex; flex-direction:column; overflow:hidden;
-      }
+      #${P}-panel{position:fixed;top:50%;right:24px;transform:translateY(-50%);width:480px;max-height:84vh;
+        z-index:999998;background:var(--c-bg);border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.55);
+        color:var(--c-tx);font:13px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;
+        display:flex;flex-direction:column;overflow:hidden;
+        --c-bg:#1e1e2e;--c-hdbg:#252540;--c-hdtx:#e0e0e0;--c-secbd:#2c2c48;--c-rowbd:#262642;
+        --c-strip:#20203a;--c-tx:#e0e0e0;--c-sub:#9499a0;--c-sub2:#5a5a7a;--c-hover:#252540;
+        --c-logbg:#141428;--c-inputbg:#2a2a3e;--c-inputbd:#454560;--c-btnbg:#2a2a3e;--c-btnbd:#454560;
+        --c-btnhov:#3a3a5e;--c-mark:#ffa502}
+      #${P}-panel[data-theme=light]{
+        --c-bg:#ffffff;--c-hdbg:#00a1d6;--c-hdtx:#ffffff;--c-secbd:#e8e8f0;--c-rowbd:#ececf2;
+        --c-strip:#f4f4f8;--c-tx:#333b4d;--c-sub:#6a7383;--c-sub2:#98a0ad;--c-hover:#f2f6fa;
+        --c-logbg:#f7f8fc;--c-inputbg:#ffffff;--c-inputbd:#ccd2dc;--c-btnbg:#eef1f6;--c-btnbd:#ccd2dc;
+        --c-btnhov:#e2e8f0;--c-mark:#ff9a12}
+      #${P}-panel *{box-sizing:border-box}
 
-      .${P}-hd {
-        display:flex; align-items:center; justify-content:space-between;
-        padding:14px 18px; background:#252540;
-        font-size:15px; font-weight:600; letter-spacing:.3px;
-      }
-      .${P}-hd button { background:none; border:none; color:#888; font-size:20px; cursor:pointer; padding:0 4px; line-height:1; }
-      .${P}-hd button:hover { color:#fff; }
+      .${P}-hd{display:flex;align-items:center;justify-content:space-between;padding:12px 18px;
+        background:var(--c-hdbg);color:var(--c-hdtx);font-size:15px;font-weight:600;cursor:move;user-select:none}
+      .${P}-hd .v{color:rgba(255,255,255,.6);font-size:11px;font-weight:400;margin-left:6px}
+      #${P}-panel[data-theme=light] .${P}-hd .v{color:rgba(255,255,255,.75)}
+      .${P}-hd .hbtns{display:flex;gap:2px}
+      .${P}-hd button{background:none;border:none;color:inherit;font-size:16px;cursor:pointer;
+        line-height:1;padding:2px 6px;opacity:.85}
+      .${P}-hd button:hover{opacity:1}
 
-      .${P}-sec { padding:10px 18px; border-bottom:1px solid #2c2c48; }
-      .${P}-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+      .${P}-sec{padding:9px 18px;border-bottom:1px solid var(--c-secbd)}
+      .${P}-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 
-      .${P}-btn {
-        padding:7px 16px; border-radius:7px; border:1px solid #444;
-        background:#2a2a3e; color:#e0e0e0; cursor:pointer; font-size:12px;
-        transition:background .15s, border-color .15s; white-space:nowrap;
-      }
-      .${P}-btn:hover:not(:disabled) { background:#3a3a5e; }
-      .${P}-btn:disabled { opacity:.4; cursor:not-allowed; }
-      .${P}-btn-p { background:#00a1d6; border-color:#00a1d6; color:#fff; }
-      .${P}-btn-p:hover:not(:disabled) { background:#00b5e5; }
-      .${P}-btn-d { background:#ff4757; border-color:#ff4757; color:#fff; }
-      .${P}-btn-d:hover:not(:disabled) { background:#ff6b7a; }
+      .${P}-btn{padding:6px 13px;border-radius:7px;border:1px solid var(--c-btnbd);background:var(--c-btnbg);
+        color:var(--c-tx);cursor:pointer;font-size:12px;white-space:nowrap;transition:background .15s}
+      .${P}-btn:hover:not(:disabled){background:var(--c-btnhov)}
+      .${P}-btn:disabled{opacity:.4;cursor:not-allowed}
+      .${P}-btn-p{background:#00a1d6;border-color:#00a1d6;color:#fff}
+      .${P}-btn-p:hover:not(:disabled){background:#00b5e5}
+      .${P}-btn-d{background:#ff4757;border-color:#ff4757;color:#fff}
+      .${P}-btn-d:hover:not(:disabled){background:#ff6b7a}
 
-      .${P}-bar-wrap {
-        padding:10px 18px; display:flex; align-items:center; gap:12px;
-      }
-      .${P}-bar { flex:1; height:8px; background:#333; border-radius:4px; overflow:hidden; }
-      .${P}-fill { height:100%; width:0%; background:linear-gradient(90deg,#00a1d6,#23e5a0); border-radius:4px; transition:width .3s; }
-      .${P}-pct { font-size:12px; color:#aaa; min-width:90px; text-align:right; white-space:nowrap; }
+      .${P}-input{width:72px;padding:5px 8px;border-radius:5px;border:1px solid var(--c-inputbd);
+        background:var(--c-inputbg);color:var(--c-tx);font-size:12px;text-align:center}
+      .${P}-input.w{width:170px}
+      .${P}-input:focus{outline:none;border-color:#00a1d6}
+      .${P}-sel{padding:5px 6px;border-radius:5px;border:1px solid var(--c-inputbd);background:var(--c-inputbg);
+        color:var(--c-tx);font-size:12px;cursor:pointer}
+      .${P}-ta{width:100%;height:66px;border-radius:6px;border:1px solid var(--c-inputbd);
+        background:var(--c-inputbg);color:var(--c-tx);font-size:12px;padding:6px;resize:vertical}
+      .${P}-hint{color:var(--c-sub);font-size:11px}
+      #${P}-cfg label,.${P}-lab{cursor:pointer;display:flex;align-items:center;gap:5px;font-size:12px;
+        color:var(--c-sub);margin-top:6px}
+      #${P}-cfg input{accent-color:#00a1d6}
+      .${P}-retry{display:none;background:#7a5cff !important;border-color:#7a5cff !important;color:#fff !important}
 
-      .${P}-toolbar {
-        display:flex; align-items:center; justify-content:space-between;
-        padding:7px 18px; background:#20203a; font-size:12px; color:#999;
-      }
-      .${P}-toolbar label { cursor:pointer; display:flex; align-items:center; gap:5px; }
-      .${P}-toolbar input[type=checkbox] { accent-color:#00a1d6; }
+      .${P}-strip{padding:7px 18px;background:var(--c-strip);font-size:12px;color:var(--c-sub);
+        display:flex;flex-direction:column;gap:5px}
+      .${P}-strip .r{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+      .${P}-cnt{margin-left:auto;color:var(--c-sub);white-space:nowrap}
+      .${P}-strip label{display:flex;align-items:center;gap:4px;cursor:pointer}
 
-      .${P}-list {
-        flex:1; min-height:100px; max-height:320px;
-        overflow-y:auto; padding:0;
-      }
-      .${P}-list::-webkit-scrollbar { width:6px; }
-      .${P}-list::-webkit-scrollbar-thumb { background:#444; border-radius:3px; }
-      .${P}-list::-webkit-scrollbar-track { background:transparent; }
+      .${P}-list{flex:1;min-height:90px;max-height:290px;overflow-y:auto}
+      .${P}-list::-webkit-scrollbar{width:6px}
+      .${P}-list::-webkit-scrollbar-thumb{background:rgba(128,128,128,.4);border-radius:3px}
+      .${P}-empty{padding:28px 18px;text-align:center;color:var(--c-sub2);font-size:13px}
+      .${P}-item{display:flex;align-items:flex-start;gap:8px;padding:8px 18px;border-bottom:1px solid var(--c-rowbd);
+        font-size:12px;transition:background .12s}
+      .${P}-item:hover{background:var(--c-hover)}
+      .${P}-item input{accent-color:#00a1d6;cursor:pointer;margin-top:3px;flex-shrink:0}
+      .${P}-item .m{flex:1;min-width:0;word-break:break-all;color:var(--c-tx)}
+      .${P}-item .meta{color:var(--c-sub2);font-size:11px;margin-top:2px}
+      .${P}-nop{color:#ff6b6b}
+      .${P}-mark{color:var(--c-mark)}
+      .${P}-jump{background:var(--c-btnbg);color:var(--c-sub);border:1px solid var(--c-btnbd);border-radius:5px;
+        padding:3px 8px;font-size:11px;cursor:pointer;white-space:nowrap;flex-shrink:0}
+      .${P}-jump:hover{color:var(--c-tx)}
+      .${P}-sent{padding:10px 18px;text-align:center;color:var(--c-sub2);font-size:11px;cursor:pointer}
 
-      .${P}-item {
-        display:flex; align-items:center; gap:8px;
-        padding:9px 18px; border-bottom:1px solid #262642;
-        transition:background .12s; font-size:12px;
-      }
-      .${P}-item:hover { background:#252540; }
-      .${P}-item.checked { background:#1a2a3e; }
-      .${P}-item input[type=checkbox] { accent-color:#00a1d6; cursor:pointer; flex-shrink:0; }
-      .${P}-item-text { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#ccc; }
-      .${P}-item-time { color:#5a5a7a; font-size:11px; flex-shrink:0; }
-
-      .${P}-empty { padding:40px 18px; text-align:center; color:#555; font-size:13px; }
-
-      .${P}-log {
-        max-height:160px; overflow-y:auto; padding:8px 18px;
-        font-size:11px; font-family:'Cascadia Code',Consolas,'Courier New',monospace;
-        background:#141428; border-top:1px solid #2c2c48;
-      }
-      .${P}-log::-webkit-scrollbar { width:5px; }
-      .${P}-log::-webkit-scrollbar-thumb { background:#444; border-radius:3px; }
-      .${P}-log-line { padding:2px 0; word-break:break-all; }
-      .${P}-log-ok   { color:#2ed573; }
-      .${P}-log-err  { color:#ff4757; }
-      .${P}-log-warn { color:#ffa502; }
-      .${P}-log-info { color:#70a1ff; }
-
-      .${P}-input {
-        width:72px; padding:5px 8px; border-radius:5px;
-        border:1px solid #444; background:#2a2a3e; color:#e0e0e0;
-        font-size:12px; text-align:center;
-      }
-      .${P}-input:focus { outline:none; border-color:#00a1d6; }
-
-      .${P}-sep { width:1px; height:20px; background:#444; margin:0 4px; }
+      .${P}-barwrap{padding:9px 18px;display:flex;align-items:center;gap:12px}
+      .${P}-bar{flex:1;height:8px;background:rgba(128,128,128,.3);border-radius:4px;overflow:hidden}
+      .${P}-fill{height:100%;width:0%;background:linear-gradient(90deg,#00a1d6,#23e5a0);border-radius:4px;
+        transition:width .3s}
+      .${P}-pct{font-size:12px;color:var(--c-sub);min-width:100px;text-align:right;white-space:nowrap}
+      .${P}-status{padding:6px 18px;color:var(--c-sub);font-size:12px;min-height:18px;white-space:pre-wrap}
+      .${P}-log{max-height:140px;overflow-y:auto;padding:7px 18px;font-size:11px;
+        font-family:'Cascadia Code',Consolas,'Courier New',monospace;background:var(--c-logbg);
+        border-top:1px solid var(--c-secbd)}
+      .${P}-log-line{padding:2px 0;word-break:break-all}
+      .${P}-ok{color:#2ed573} .${P}-err{color:#ff4757} .${P}-warn{color:#ffa502} .${P}-info{color:#70a1ff}
     `;
     document.head.appendChild(s);
   }
 
-  /* ═══════════ 构建 UI ═══════════ */
+  /* ═══════════ UI 构建 ═══════════ */
   function buildUI() {
     const toggle = document.createElement('button');
     toggle.id = `${P}-toggle`;
-    toggle.innerHTML = '🗑️';
-    toggle.title = 'B站评论批量删除';
+    toggle.innerHTML = '\u{1F5D1}\uFE0F';
+    toggle.title = `B站评论批量删除 v${VERSION}`;
     document.body.appendChild(toggle);
 
     const panel = document.createElement('div');
     panel.id = `${P}-panel`;
     panel.style.display = 'none';
-    panel.innerHTML = `
-      <div class="${P}-hd">
-        <span>🗑️ B站评论批量删除</span>
-        <button id="${P}-close">×</button>
-      </div>
 
+    panel.innerHTML = `
+      <div class="${P}-hd" id="${P}-hdr">
+        <span>B站评论批量删除<span class="v">v${VERSION}</span></span>
+        <span class="hbtns">
+          <button id="${P}-theme" title="切换明/暗主题">🌓</button>
+          <button id="${P}-close" title="隐藏面板">×</button>
+        </span>
+      </div>
       <div class="${P}-sec">
         <div class="${P}-row">
-          <button class="${P}-btn ${P}-btn-p" id="${P}-load">📥 获取全部评论</button>
+          <button class="${P}-btn ${P}-btn-p" id="${P}-load" title="通过第三方 aicu 索引拉取全部评论（推荐首选）">📥 AICU 获取</button>
+          <button class="${P}-btn" id="${P}-hist" title="翻观看历史→逐视频扫自己的评论（纯官方接口，仅视频评论）">🏛️ 官方历史</button>
           <button class="${P}-btn" id="${P}-stop" style="display:none">⏹ 停止</button>
-          <div class="${P}-sep"></div>
-          <span style="color:#888;font-size:12px">删除间隔</span>
-          <input class="${P}-input" type="number" id="${P}-delay" value="${DELAY_DEFAULT}" min="200" max="5000" step="50">
-          <span style="color:#888;font-size:12px">ms</span>
+        </div>
+        <div class="${P}-row" style="margin-top:7px">
+          <textarea class="${P}-ta" id="${P}-ta" placeholder="离线兜底：粘贴 aicu 导出的 JSON（含 replies 数组均可）"></textarea>
+        </div>
+        <div class="${P}-row" style="margin-top:4px">
+          <button class="${P}-btn" id="${P}-import">📋 导入 JSON</button>
+          <span class="${P}-hint">aicu 不可用时：在其网页导出后手动粘贴</span>
         </div>
       </div>
-
-      <div class="${P}-sec">
+      <div class="${P}-sec" id="${P}-cfg">
         <div class="${P}-row">
           <button class="${P}-btn ${P}-btn-d" id="${P}-dsel" disabled>🔥 删除选中</button>
           <button class="${P}-btn ${P}-btn-d" id="${P}-dall" disabled>💣 删除全部</button>
+          <button class="${P}-btn ${P}-retry" id="${P}-retry">↻ 重试未成功</button>
+          <span style="color:var(--c-sub);font-size:12px">间隔</span>
+          <input class="${P}-input" type="number" id="${P}-delay" value="${DELAY_DEFAULT}" min="200" max="5000" step="50">
+          <span style="color:var(--c-sub);font-size:12px">ms</span>
+        </div>
+        <label><input type="checkbox" id="${P}-recheck" checked> 删除后官方回查确认（已确认/待确认/未生效 三态统计）</label>
+      </div>
+      <div class="${P}-strip">
+        <div class="r">
+          <input class="${P}-input w" type="text" id="${P}-kw" placeholder="关键词筛选">
+          <button class="${P}-btn" id="${P}-filter" style="padding:4px 10px">筛选</button>
+          <button class="${P}-btn" id="${P}-clearf" style="padding:4px 10px">清除</button>
+          <span class="${P}-cnt" id="${P}-cnt">0 条</span>
+        </div>
+        <div class="r">
+          <label>来源 <select class="${P}-sel" id="${P}-srcsel">
+            <option value="all">全部</option><option value="aicu">aicu</option>
+            <option value="history">官方历史</option><option value="import">导入</option>
+          </select></label>
+          <label>类型 <select class="${P}-sel" id="${P}-typesel">
+            <option value="all">全部</option><option value="1">视频</option><option value="11">番剧</option>
+            <option value="12">专栏</option><option value="17">动态</option><option value="21">直播</option>
+          </select></label>
+          <label>排序 <select class="${P}-sel" id="${P}-sortsel">
+            <option value="default">默认</option><option value="tasc">时间↑</option><option value="tdesc">时间↓</option>
+          </select></label>
+          <button class="${P}-btn" id="${P}-selall" style="padding:4px 10px">全选</button>
+          <button class="${P}-btn" id="${P}-selnone" style="padding:4px 10px">全不选</button>
+          <button class="${P}-btn" id="${P}-expj" title="导出当前筛选下列表为 JSON（删除前备份）">💾JSON</button>
+          <button class="${P}-btn" id="${P}-expc" title="导出当前筛选下列表为 CSV">💾CSV</button>
+          <button class="${P}-btn" id="${P}-reset" title="清空当前列表与勾选">🧹清空</button>
         </div>
       </div>
-
-      <div class="${P}-toolbar">
-        <label><input type="checkbox" id="${P}-sa"> 全选</label>
-        <span id="${P}-cnt">0 条评论</span>
-      </div>
-
       <div class="${P}-list" id="${P}-list">
-        <div class="${P}-empty">点击「获取全部评论」拉取你的所有评论（通过 AICU API）</div>
+        <div class="${P}-empty">三选一：AICU 全量获取 / 官方历史扫描 / 粘贴 JSON 导入</div>
       </div>
-
-      <div class="${P}-bar-wrap" id="${P}-prog" style="display:none">
+      <div class="${P}-barwrap" id="${P}-prog" style="display:none">
         <div class="${P}-bar"><div class="${P}-fill" id="${P}-fill"></div></div>
         <span class="${P}-pct" id="${P}-pct">0%</span>
       </div>
-
+      <div class="${P}-status" id="${P}-status"></div>
       <div class="${P}-log" id="${P}-log"></div>
     `;
     document.body.appendChild(panel);
 
+    const $el = (id) => document.getElementById(id);
+
+    /* —— 顶部 —— */
     toggle.onclick = () => {
       panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
     };
-    $(`#${P}-close`).onclick = () => (panel.style.display = 'none');
-    $(`#${P}-load`).onclick = loadComments;
-    $(`#${P}-dsel`).onclick = () => startDelete(false);
-    $(`#${P}-dall`).onclick = () => {
-      if (!confirm(`确认删除全部 ${comments.length} 条评论？此操作不可撤销！`)) return;
-      startDelete(true);
+    $el(`${P}-close`).onclick = () => { panel.style.display = 'none'; };
+    $el(`${P}-stop`).onclick = () => { aborted = true; log('正在停止…（当前请求结束后退出）', 'warn'); };
+    $el(`${P}-theme`).onclick = () => {
+      const t = panel.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+      panel.setAttribute('data-theme', t);
+      saveSettings();
     };
-    $(`#${P}-stop`).onclick = () => {
-      aborted = true;
-      log('正在停止...', 'warn');
+
+    /* —— 枚举 —— */
+    $el(`${P}-load`).onclick = loadAicu;
+    $el(`${P}-hist`).onclick = loadHistory;
+    $el(`${P}-import`).onclick = onImport;
+
+    /* —— 筛选/选择/导出 —— */
+    $el(`${P}-filter`).onclick = onFilter;
+    $el(`${P}-clearf`).onclick = () => { $el(`${P}-kw`).value = ''; onFilter(); };
+    $el(`${P}-kw`).addEventListener('keydown', (e) => { if (e.key === 'Enter') onFilter(); });
+    $el(`${P}-srcsel`).onchange = () => { filtSrc = $el(`${P}-srcsel`).value; renderList(); updCount(); };
+    $el(`${P}-typesel`).onchange = () => { filtType = $el(`${P}-typesel`).value; renderList(); updCount(); };
+    $el(`${P}-sortsel`).onchange = () => { sortMode = $el(`${P}-sortsel`).value; renderList(); updCount(); };
+    $el(`${P}-selall`).onclick = () => {
+      visibleComments().forEach((c) => { if (c.oid && c.type) selected.add(c.rpid); });
+      renderList(); updCount();
     };
-    $(`#${P}-sa`).onchange = onSelAll;
+    $el(`${P}-selnone`).onclick = () => { selected.clear(); renderList(); updCount(); };
+    $el(`${P}-expj`).onclick = () => doExport('json');
+    $el(`${P}-expc`).onclick = () => doExport('csv');
+    $el(`${P}-reset`).onclick = () => {
+      if (!confirm('清空当前列表与勾选？（已删除记录不受影响）')) return;
+      resetDataset();
+      setStatus('列表已清空。');
+      log('🧹 列表已清空', 'warn');
+    };
+
+    /* —— 删除 —— */
+    $el(`${P}-dsel`).onclick = () => runDelete('selected');
+    $el(`${P}-dall`).onclick = () => runDelete('all');
+    $el(`${P}-retry`).onclick = () => {
+      const rp = [...(batchResults || [])].filter(([, s]) => s !== 'ok').map(([r]) => r);
+      const targets = comments.filter((c) => rp.includes(c.rpid) && c.oid && c.type);
+      if (!targets.length) { setStatus('没有需要重试的条目。'); return; }
+      runDelete('explicit', targets, '重试未成功');
+    };
+    $el(`${P}-retry`).style.display = 'none';
+
+    /* —— 列表事件委托（万级数据不挂） —— */
+    const listEl = $el(`${P}-list`);
+    listEl.addEventListener('change', (e) => {
+      if (!e.target.matches('input[type="checkbox"]')) return;
+      const rpid = Number(e.target.dataset.rpid);
+      e.target.checked ? selected.add(rpid) : selected.delete(rpid);
+      updCount();
+    });
+    listEl.addEventListener('click', (e) => {
+      const jb = e.target.closest('button[data-act="jump"]');
+      if (!jb) return;
+      const c = comments.find((x) => x.rpid === Number(jb.dataset.rpid));
+      if (c) jumpTo(c);
+    });
+
+    /* —— 面板拖拽（位置记忆 + 越界复位） —— */
+    const hdr = $el(`${P}-hdr`);
+    let drag = null;
+    hdr.addEventListener('mousedown', (e) => {
+      if (e.target.closest('button')) return;
+      const rect = panel.getBoundingClientRect();
+      drag = { ox: e.clientX - rect.left, oy: e.clientY - rect.top };
+      panel.style.right = 'auto';
+      panel.style.top = rect.top + 'px';
+      panel.style.left = rect.left + 'px';
+      panel.style.transform = 'none';
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!drag) return;
+      const x = Math.min(Math.max(8, e.clientX - drag.ox), window.innerWidth - 120);
+      const y = Math.min(Math.max(8, e.clientY - drag.oy), window.innerHeight - 60);
+      panel.style.left = x + 'px';
+      panel.style.top = y + 'px';
+    });
+    window.addEventListener('mouseup', () => {
+      if (drag) { drag = null; saveSettings(); }
+    });
+
+    /* —— 恢复设置 —— */
+    try {
+      const saved = JSON.parse(localStorage.getItem(P) || '{}');
+      if (saved.delay) $el(`${P}-delay`).value = saved.delay;
+      if (saved.recheck === false) $el(`${P}-recheck`).checked = false;
+      if (saved.theme === 'light') panel.setAttribute('data-theme', 'light');
+      if (saved.left && saved.top && Number(saved.left) > 0 && Number(saved.left) < window.innerWidth - 100
+          && Number(saved.top) > 0 && Number(saved.top) < window.innerHeight - 60) {
+        panel.style.right = 'auto';
+        panel.style.left = saved.left + 'px';
+        panel.style.top = saved.top + 'px';
+        panel.style.transform = 'none';
+      }
+    } catch (e) { /* noop */ }
+    $el(`${P}-delay`).addEventListener('change', saveSettings);
+    $el(`${P}-recheck`).addEventListener('change', saveSettings);
+
+    /* —— 初始状态 —— */
+    const csrf = getCookie('bili_jct');
+    const uid = getCookie('DedeUserID');
+    if (csrf && uid) setStatus(`已登录 UID=${uid}，bili_jct 就绪。删除不可逆，请谨慎。`);
+    else setStatus('⚠️ 未检测到登录态（请先在 bilibili.com 登录后刷新）。可先导入/浏览，删除需登录。');
+    renderList(); updCount();
   }
 
-  /* ═══════════ 渲染评论列表 ═══════════ */
+  function saveSettings() {
+    try {
+      const panel = document.getElementById(`${P}-panel`);
+      localStorage.setItem(P, JSON.stringify({
+        delay: parseInt(document.getElementById(`${P}-delay`).value, 10) || DELAY_DEFAULT,
+        recheck: document.getElementById(`${P}-recheck`).checked,
+        theme: panel && panel.getAttribute('data-theme') || 'dark',
+        left: panel && panel.style.left ? parseInt(panel.style.left, 10) : 0,
+        top: panel && panel.style.top ? parseInt(panel.style.top, 10) : 0,
+      }));
+    } catch (e) { /* noop */ }
+  }
+
+  /* ═══════════ 视图/筛选 ═══════════ */
+  function visibleComments() {
+    let list = comments;
+    if (filterKw) list = list.filter((c) => (c.message || '').toLowerCase().includes(filterKw.toLowerCase()));
+    if (filtSrc !== 'all') list = list.filter((c) => c.src === filtSrc);
+    if (filtType !== 'all') list = list.filter((c) => String(c.type) === filtType);
+    if (sortMode === 'tasc') list = [...list].sort((a, b) => (a.ctime || 0) - (b.ctime || 0));
+    else if (sortMode === 'tdesc') list = [...list].sort((a, b) => (b.ctime || 0) - (a.ctime || 0));
+    return list;
+  }
+
+  let viewSnap = [];      // 当前渲染快照
+  let viewOffset = 0;     // 已渲染条数
+  let ro = null;          // IntersectionObserver
+
+  function buildRow(c) {
+    const row = document.createElement('div');
+    row.className = `${P}-item`;
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = selected.has(c.rpid);
+    cb.dataset.rpid = String(c.rpid);
+    row.appendChild(cb);
+
+    const main = document.createElement('div');
+    main.className = 'm';
+    const msgDiv = document.createElement('div');
+    msgDiv.textContent = c.message || '(空评论)';   // 安全：永远 textContent
+    main.appendChild(msgDiv);
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.appendChild(document.createTextNode(`${typeText(c.type)} · ${fmtTime(c.ctime)} · rpid:${c.rpid} · ${SRC_TEXT[c.src] || c.src}`));
+    const jm = journalMap();
+    if (jm.has(c.rpid)) {
+      const st = jm.get(c.rpid);
+      const b = document.createElement('span');
+      b.className = `${P}-mark`;
+      b.textContent = st === 'ok' ? ' ·上次已删除✓' : st === 'fail' ? ' ·上次失败' : ' ·上次待确认';
+      meta.appendChild(b);
+    }
+    if (!c.oid || !c.type) {
+      const bad = document.createElement('span');
+      bad.className = `${P}-nop`;
+      bad.textContent = ' ·[缺 oid/type，无法操作]';
+      meta.appendChild(bad);
+    }
+    main.appendChild(meta);
+    row.appendChild(main);
+
+    if (c.oid && c.type) {
+      const jb = document.createElement('button');
+      jb.className = `${P}-jump`;
+      jb.textContent = '↗';
+      jb.title = '新标签页打开评论所在页面';
+      jb.dataset.act = 'jump';
+      jb.dataset.rpid = String(c.rpid);
+      row.appendChild(jb);
+    }
+    return row;
+  }
+
+  function appendChunk() {
+    const listEl = document.getElementById(`${P}-list`);
+    if (!listEl || viewOffset >= viewSnap.length) return;
+    const slice = viewSnap.slice(viewOffset, viewOffset + RENDER_CHUNK);
+    const frag = document.createDocumentFragment();
+    for (const c of slice) frag.appendChild(buildRow(c));
+    const sent = listEl.querySelector(`#${P}-sentinel`);
+    listEl.insertBefore(frag, sent);
+    viewOffset += slice.length;
+    updateSentinel();
+  }
+
+  function updateSentinel() {
+    const sent = document.getElementById(`${P}-sentinel`);
+    if (!sent) return;
+    if (viewOffset >= viewSnap.length) {
+      if (ro) { ro.disconnect(); ro = null; }
+      if (sent.parentNode) sent.parentNode.removeChild(sent);
+    } else {
+      sent.textContent = `下滑加载更多（${viewOffset}/${viewSnap.length} 已渲染）…`;
+    }
+  }
+
   function renderList() {
-    const el = $(`#${P}-list`);
-    if (!comments.length) {
-      el.innerHTML = `<div class="${P}-empty">没有找到评论 🎉</div>`;
+    const listEl = document.getElementById(`${P}-list`);
+    if (!listEl) return;
+    if (ro) { ro.disconnect(); ro = null; }
+    viewSnap = visibleComments();
+    viewOffset = 0;
+    listEl.innerHTML = '';
+
+    if (!viewSnap.length) {
+      const d = document.createElement('div');
+      d.className = `${P}-empty`;
+      d.textContent = comments.length && (filterKw || filtSrc !== 'all' || filtType !== 'all')
+        ? '当前筛选无匹配。' : '暂无评论数据。';
+      listEl.appendChild(d);
+      updCount();
       return;
     }
-    el.innerHTML = comments
-      .map((c) => {
-        const t = c.ctime ? new Date(c.ctime * 1000).toLocaleDateString('zh-CN') : '';
-        const chk = selected.has(c.rpid) ? 'checked' : '';
-        return `<div class="${P}-item ${chk ? 'checked' : ''}" data-rpid="${c.rpid}">
-          <input type="checkbox" data-rpid="${c.rpid}" ${chk}>
-          <span class="${P}-item-text" title="${escHtml(c.message)}">${escHtml(c.message) || '(无内容)'}</span>
-          <span class="${P}-item-time">${t}</span>
-        </div>`;
-      })
-      .join('');
 
-    el.querySelectorAll('input[type=checkbox]').forEach((cb) => {
-      cb.onchange = () => {
-        const rpid = Number(cb.dataset.rpid);
-        cb.checked ? selected.add(rpid) : selected.delete(rpid);
-        cb.closest(`.${P}-item`).classList.toggle('checked', cb.checked);
-        updCount();
-      };
-    });
+    const sent = document.createElement('div');
+    sent.id = `${P}-sentinel`;
+    sent.className = `${P}-sent`;
+    sent.addEventListener('click', appendChunk);
+    listEl.appendChild(sent);
+
+    if ('IntersectionObserver' in window) {
+      ro = new IntersectionObserver((es) => {
+        if (es.some((e) => e.isIntersecting)) appendChunk();
+      }, { root: listEl, rootMargin: '140px' });
+      ro.observe(sent);
+    }
+    appendChunk();
     updCount();
   }
 
   function updCount() {
-    $(`#${P}-cnt`).textContent = `${selected.size}/${comments.length} 条`;
-    $(`#${P}-dsel`).disabled = !selected.size || deleting;
-    $(`#${P}-dall`).disabled = !comments.length || deleting;
+    const vis = visibleComments().filter((c) => c.oid && c.type);
+    const nSel = visibleComments().filter((c) => selected.has(c.rpid)).length;
+    document.getElementById(`${P}-dsel`).disabled = !vis.length || deleting || fetching;
+    document.getElementById(`${P}-dall`).disabled = !vis.length || deleting || fetching;
+    document.getElementById(`${P}-cnt`).textContent = `${nSel}/${vis.length} 条`;
   }
 
-  function onSelAll() {
-    const all = $(`#${P}-sa`).checked;
-    selected = all ? new Set(comments.map((c) => c.rpid)) : new Set();
+  function onFilter() {
+    filterKw = document.getElementById(`${P}-kw`).value.trim();
     renderList();
-    $(`#${P}-sa`).checked = all;
+    setStatus(filterKw ? `已按「${filterKw}」筛选。` : '已清除关键词。');
   }
 
-  function showProg(show) {
-    $(`#${P}-prog`).style.display = show ? 'flex' : 'none';
-    $(`#${P}-stop`).style.display = show ? 'inline-block' : 'none';
-    if (show) {
-      $(`#${P}-fill`).style.width = '0%';
-      $(`#${P}-pct`).textContent = '0%';
-    }
+  /* ═══════════ 控制器：枚举 ═══════════ */
+  function requireLogin() {
+    const uid = getCookie('DedeUserID');
+    const csrf = getCookie('bili_jct');
+    return (uid && csrf) ? uid : null;
   }
 
-  function setProg(done, total) {
-    const pct = Math.round((done / total) * 100);
-    $(`#${P}-fill`).style.width = pct + '%';
-    $(`#${P}-pct`).textContent = `${pct}% (${done}/${total})`;
-  }
-
-  function log(msg, type = 'info') {
-    const el = $(`#${P}-log`);
-    const d = document.createElement('div');
-    d.className = `${P}-log-line ${P}-log-${type}`;
-    d.textContent = `[${now()}] ${msg}`;
-    el.appendChild(d);
-    el.scrollTop = el.scrollHeight;
-  }
-
-  function now() {
-    return new Date().toLocaleTimeString('zh-CN', { hour12: false });
-  }
-
-  function escHtml(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  }
-
-  function lockBtns(locked) {
-    $(`#${P}-load`).disabled = locked;
-    $(`#${P}-dsel`).disabled = locked;
-    $(`#${P}-dall`).disabled = locked;
-  }
-
-  /* ═══════════ 控制器：通过 AICU 获取全部评论 ═══════════ */
-  async function loadComments() {
-    const btn = $(`#${P}-load`);
-    btn.disabled = true;
-    btn.textContent = '⏳ 获取中...';
-    comments = [];
-    selected.clear();
-    aborted = false;
-
+  async function loadAicu() {
+    const myUid = requireLogin();
+    if (!myUid) { setStatus('❌ 未检测到登录态，无法枚举。请先登录 bilibili.com 并刷新。'); return; }
+    const btn = document.getElementById(`${P}-load`);
+    btn.disabled = true; fetching = true; aborted = false;
+    document.getElementById(`${P}-hist`).disabled = true;
+    document.getElementById(`${P}-stop`).style.display = 'inline-block';
+    setStatus('AICU 枚举中…（每页 500 条，间隔 3s 防风控）');
     try {
-      const csrf = getCSRF();
-      if (!csrf) {
-        log('未检测到 bili_jct，请先登录B站', 'err');
-        return;
-      }
-
-      const user = await getUserInfo();
-      log(`当前账号: ${user.uname} (UID: ${user.mid})`, 'info');
-      log('正在通过 AICU API 获取全部评论...', 'info');
-
-      await fetchAicuComments(user.mid);
-
-      log(`✅ 共获取 ${comments.length} 条评论`, 'ok');
-      renderList();
+      log(`开始 AICU 枚举 UID=${myUid}`);
+      datasetUid = myUid;
+      await fetchAicuComments(myUid);
+      renderList(); updCount();
+      setStatus(`✅ AICU 枚举完成：累计 ${comments.length} 条（去重）。`);
+      log(`✅ AICU 枚举完成，累计 ${comments.length} 条`, 'ok');
     } catch (e) {
-      log(`获取失败: ${e.message}`, 'err');
+      setStatus(`❌ 枚举失败：${e.message}`);
+      log(`枚举失败: ${e.message}`, 'err');
     } finally {
-      btn.disabled = false;
-      btn.textContent = '📥 获取全部评论';
+      btn.disabled = false; fetching = false;
+      document.getElementById(`${P}-hist`).disabled = false;
+      document.getElementById(`${P}-stop`).style.display = 'none';
       updCount();
     }
   }
 
-  /* ═══════════ 控制器：删除评论 ═══════════ */
-  async function startDelete(all) {
-    const targets = all
-      ? [...comments]
-      : comments.filter((c) => selected.has(c.rpid));
-    if (!targets.length) {
-      log('没有可删除的评论', 'warn');
-      return;
+  async function loadHistory() {
+    const myUid = requireLogin();
+    if (!myUid) { setStatus('❌ 未登录，官方历史扫描需要登录态。'); return; }
+    const btn = document.getElementById(`${P}-hist`);
+    btn.disabled = true; fetching = true; aborted = false;
+    document.getElementById(`${P}-load`).disabled = true;
+    document.getElementById(`${P}-stop`).style.display = 'inline-block';
+    setStatus('官方历史扫描：翻历史 → 逐视频扫评论（仅视频，aicu 的兜底）…');
+    try {
+      if (datasetUid && datasetUid !== myUid) log(`⚠️ 列表属于 UID=${datasetUid}，本次扫描账号 UID=${myUid}`, 'warn');
+      else if (!datasetUid) datasetUid = myUid;
+      const scanPages = Number(localStorage.getItem(`${P}_scanpages`)) || VIDEO_SCAN_PAGES_DEFAULT;
+      log(`开始官方历史扫描 UID=${myUid}（每视频 ${scanPages} 页）`);
+      await fetchHistoryComments(myUid, scanPages);
+      renderList(); updCount();
+      setStatus(`✅ 官方扫描完成：累计 ${comments.length} 条。`);
+      log(`✅ 官方历史扫描完成`, 'ok');
+    } catch (e) {
+      setStatus(`❌ 官方扫描失败：${e.message}`);
+      log(`官方扫描失败: ${e.message}`, 'err');
+    } finally {
+      btn.disabled = false; fetching = false;
+      document.getElementById(`${P}-load`).disabled = false;
+      document.getElementById(`${P}-stop`).style.display = 'none';
+      updCount();
     }
+  }
 
-    deleting = true;
-    aborted = false;
-    stats = { ok: 0, fail: 0 };
-    const delay = parseInt($(`#${P}-delay`).value) || DELAY_DEFAULT;
+  function onImport() {
+    const raw = document.getElementById(`${P}-ta`).value.trim();
+    if (!raw) { setStatus('请先粘贴 JSON 内容。'); return; }
+    const r = importJson(raw);
+    renderList();
+    setStatus(r.ok ? `✅ ${r.msg}（来源标记：导入）` : `❌ ${r.msg}`);
+    log(r.ok ? `导入: ${r.msg}` : `导入失败: ${r.msg}`, r.ok ? 'ok' : 'err');
+  }
 
-    lockBtns(true);
+  function lockWhileDeleting(locked) {
+    ['dsel', 'dall', 'retry', 'load', 'hist', 'import', 'reset'].forEach((k) => {
+      const el = document.getElementById(`${P}-${k}`);
+      if (el) el.disabled = locked;
+    });
+  }
+
+  /* ═══════════ 控制器：删除 ═══════════ */
+  async function runDelete(mode, explicitTargets, scopeLabel) {
+    let targets, scope;
+    if (mode === 'explicit' && explicitTargets) {
+      targets = explicitTargets; scope = scopeLabel || '重试';
+    } else if (mode === 'all') {
+      targets = comments.filter((c) => c.oid && c.type);
+      scope = '全部列表';
+    } else {
+      targets = visibleComments().filter((c) => c.oid && c.type && selected.has(c.rpid));
+      scope = '筛选下选中';
+    }
+    if (!targets.length) { setStatus('没有可删除的评论。'); return; }
+
+    const csrf = getCookie('bili_jct');
+    if (!csrf) { setStatus('❌ 未检测到 bili_jct（登录态），请先登录并刷新页面。'); return; }
+
+    // 换号防护：列表枚举账号与当前登录账号不一致时，明确提醒
+    const curUid = getCookie('DedeUserID');
+    if (datasetUid && curUid && datasetUid !== curUid) {
+      if (!confirm(`⚠️ 列表来自 UID=${datasetUid}，当前登录 UID=${curUid}。\n删除接口只会作用于当前登录账号名下的评论（他人评论不会被删）。\n继续执行 ${targets.length} 条删除？`)) return;
+    }
+    if (!confirm(`即将删除 ${targets.length} 条评论（${scope}）。\n\n⚠️ 此操作不可逆！确认删除？`)) return;
+
+    deleting = true; aborted = false;
+    batchResults = new Map();
+    recheckCache = new Map(); threadCache = new Map();   // 回查缓存仅批次内有效
+    const retryBtn = document.getElementById(`${P}-retry`);
+    if (retryBtn) { retryBtn.style.display = 'none'; }
+    const recheckOn = document.getElementById(`${P}-recheck`).checked;
+    const delay = Math.max(200, parseInt(document.getElementById(`${P}-delay`).value, 10) || DELAY_DEFAULT);
+
+    lockWhileDeleting(true);
     showProg(true);
-    log(`🔥 开始删除 ${targets.length} 条，间隔 ${delay}ms`, 'warn');
+    log(`🔥 开始删除 ${targets.length} 条（${scope}），间隔 ${delay}ms，回查${recheckOn ? '开' : '关'}`, 'warn');
 
+    let ok = 0, fail = 0, uncertain = 0;
+    const pending = [];           // 已提交删除、留待统一回查的条目
     for (let i = 0; i < targets.length; i++) {
-      if (aborted) {
-        log('⏹ 已停止', 'warn');
-        break;
-      }
-
+      if (aborted) { log('⏹ 已停止', 'warn'); break; }
       const c = targets[i];
       setProg(i, targets.length);
+      setStatus(`删除阶段 ${i + 1}/${targets.length} …`);
 
-      try {
-        await delComment(c.type, c.oid, c.rpid);
-        stats.ok++;
-        log(`✓ ${c.message.slice(0, 50)}`, 'ok');
-      } catch (e) {
-        stats.fail++;
-        log(`✗ ${c.message.slice(0, 50)} → ${e.message}`, 'err');
-        if (e.message.includes('频率') || e.message.includes('频繁')) {
-          const cool = delay * 3;
-          log(`⏳ 频率限制，冷却 ${cool}ms...`, 'warn');
-          await sleep(cool);
+      let result = null;          // 'ok' | 'uncertain' | 'fail'
+      let submittedPending = false;
+      let attempt = 0;
+      while (attempt < DELETE_MAX_RETRY) {
+        if (aborted) break;
+        let j = null;
+        try { j = await doDelete(c, csrf); }
+        catch (e) { result = 'fail'; log(`✗ 请求异常 rpid=${c.rpid} ${e.message}`, 'err'); break; }
+        const codeStr = String(j.code);
+        if (j.code === 0 || j.code === 12022 || j.code === -404) {
+          if (!recheckOn) {
+            result = 'ok';
+            log(j.code === 0 ? `✓ 已提交删除 rpid=${c.rpid}` : `• ${j.code}：评论已不存在 rpid=${c.rpid}`);
+          } else {
+            submittedPending = true;
+            log(`${j.code === 0 ? '✓' : '•'} ${j.code === 0 ? '已提交' : `接口${j.code}（视为已删）`}，待统一回查 rpid=${c.rpid}`);
+          }
+          break;
         }
+        if (j.code === -509) {
+          const wait = 2000 * (attempt + 1);
+          log(`⏳ 限流 -509，${wait}ms 后重试（${attempt + 1}/${DELETE_MAX_RETRY - 1}）…`, 'warn');
+          await sleep(wait); attempt++;
+          continue;
+        }
+        result = 'fail';
+        log(`✗ rpid=${c.rpid} code=${j.code} ${j.message || ERR_TEXT[codeStr] || ''}`, 'err');
+        break;
       }
-
+      if (!result && !submittedPending) {   // 限流耗尽 / 中途停止 → 显式记录（不是静默漏计）
+        result = aborted ? 'uncertain' : 'fail';
+        log(aborted ? `⏹ 停止于 rpid=${c.rpid}（按待确认处理，可重试）`
+                    : `✗ rpid=${c.rpid} 连续 ${DELETE_MAX_RETRY - 1} 次限流后放弃（可用「重试未成功」）`, 'err');
+      }
+      if (result) {
+        batchResults.set(c.rpid, result);
+        journalAdd(c.rpid, result);
+        if (result === 'ok') ok++; else if (result === 'uncertain') uncertain++; else fail++;
+      } else {
+        pending.push(c);
+      }
       await sleep(delay);
     }
 
+    // ── 统一回查（v2.2.1：每区域一次全量 walk，可判定） ──
+    if (pending.length) {
+      setStatus('回查阶段：逐区全量核对…');
+      log(`🔍 统一回查 ${pending.length} 条（顶评走 /reply/main 全区，楼中楼走 /reply/reply 整楼）`);
+      for (let i = 0; i < pending.length; i++) {
+        if (aborted) break;
+        const c = pending[i];
+        setStatus(`回查 ${i + 1}/${pending.length}（oid=${c.oid}…）`);
+        let v = null;
+        try { v = await recheckDefinitive(c); } catch (e) { v = null; }
+        let state, msg;
+        if (!v || !v.state) { state = 'uncertain'; msg = `回查不可用（区/楼接口异常），↗跳转复核`; }
+        else if (v.state === 'ok') { state = 'ok'; msg = `已确认删除（${v.why}）`; }
+        else if (v.state === 'fail') { state = 'fail'; msg = `未生效（${v.why}）`; }
+        else { state = 'uncertain'; msg = v.why; }
+        batchResults.set(c.rpid, state);
+        journalAdd(c.rpid, state);
+        if (state === 'ok') ok++; else if (state === 'uncertain') uncertain++; else fail++;
+        log(`${state === 'ok' ? '✓' : state === 'fail' ? '✗' : '～'} rpid=${c.rpid} ${msg}`,
+            state === 'ok' ? 'ok' : state === 'fail' ? 'err' : 'warn');
+        await sleep(150);
+      }
+    }
+
     setProg(targets.length, targets.length);
-    log(
-      `🎉 完成！成功 ${stats.ok}，失败 ${stats.fail}`,
-      stats.fail ? 'warn' : 'ok'
-    );
+    const sum = `完成：确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}。`;
+    setStatus(sum);
+    log(`==== ${sum} ====`, fail ? 'warn' : 'ok');
     deleting = false;
-    lockBtns(false);
+    lockWhileDeleting(false);
     showProg(false);
+    renderList(); updCount();
+
+    if (fail + uncertain > 0) {
+      const rb = document.getElementById(`${P}-retry`);
+      rb.textContent = `↻ 重试未成功(${fail + uncertain})`;
+      rb.style.display = 'inline-block';
+    }
+  }
+
+  /* ═══════════ 小部件 ═══════════ */
+  function log(msg, type) {
+    const el = document.getElementById(`${P}-log`);
+    if (!el) return;
+    const d = document.createElement('div');
+    d.className = `${P}-log-line ${P}-${type || 'info'}`;
+    d.textContent = `[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${msg}`;
+    el.appendChild(d);
+    while (el.children.length > 300) el.removeChild(el.firstChild);
+    el.scrollTop = el.scrollHeight;
+  }
+  function setStatus(t) { const el = document.getElementById(`${P}-status`); if (el) el.textContent = t; }
+  function showProg(show) {
+    const el = document.getElementById(`${P}-prog`);
+    if (!el) return;
+    el.style.display = show ? 'flex' : 'none';
+    if (show) {
+      document.getElementById(`${P}-fill`).style.width = '0%';
+      document.getElementById(`${P}-pct`).textContent = '0%';
+    }
+  }
+  function setProg(done, total) {
+    const pct = Math.round((done / total) * 100);
+    document.getElementById(`${P}-fill`).style.width = pct + '%';
+    document.getElementById(`${P}-pct`).textContent = `${pct}% (${done}/${total})`;
   }
 
   /* ═══════════ 初始化 ═══════════ */
-  injectCSS();
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', buildUI);
+    document.addEventListener('DOMContentLoaded', () => { injectCSS(); buildUI(); });
   } else {
-    buildUI();
+    injectCSS(); buildUI();
   }
 })();
