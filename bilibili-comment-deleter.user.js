@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.17
+// @version      2.2.18
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.17';
+  const VERSION = '2.2.18';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -169,8 +169,18 @@
     }));
     let j;
     try { j = parseJsonRes(r); }
-    catch (e) { j = { code: -1, message: ((r && r.responseText) || '空响应').slice(0, 120) }; }
+    catch (e) { j = explainNonJson(r); }
     return j;
+  }
+
+  function explainNonJson(r) {
+    const text = String((r && r.responseText) || '');
+    const status = (r && r.status) || '?';
+    if (status === 412 || /<\s*html|waf|captcha/i.test(text.slice(0, 500))) {
+      return { code: -9000, message: `返回了网页而不是接口数据（HTTP ${status}），多半是风控` };
+    }
+    if (!text.trim()) return { code: -9000, message: `空响应（HTTP ${status}）` };
+    return { code: -9000, message: `无法解析响应（HTTP ${status}）` };
   }
 
   /* ═══════════ 处理日志（localStorage 持久化） ═══════════ */
@@ -452,13 +462,14 @@
     else if (data.data && Array.isArray(data.data.replies)) replies = data.data.replies;
     if (!replies) return { ok: false, msg: '未识别的结构：需要 replies 数组（aicu 导出 / 原始单页 JSON / 裸数组）' };
 
-    let added = 0, skipped = 0;
+    let added = 0, dup = 0, invalid = 0;
     for (const it of replies) {
       const item = mapAicuReply(it);
-      if (item) item.src = 'import';   // 与 aicu 枚举区分来源（冒烟测试抓到的标注 bug）
-      if (item && addIfAbsent(item)) added++; else skipped++;
+      if (!item) { invalid++; continue; }
+      item.src = 'import';
+      if (addIfAbsent(item)) added++; else dup++;
     }
-    return { ok: true, msg: `导入完成：新增 ${added}，跳过 ${skipped}（无效/重复）` };
+    return { ok: true, msg: `导入完成：新增 ${added}，重复 ${dup}，无效 ${invalid}` };
   }
 
   /* ═══════════ 删除 + 回查 ═══════════ */
@@ -1450,10 +1461,17 @@
           }
           break;
         }
-        if (j.code === -509) {
-          const wait = 2000 * (attempt + 1);
-          setStatus(`限流 -509，${Math.round(wait / 1000)}s 后重试 ${attempt + 1}/${DELETE_MAX_RETRY - 1} · rpid=${c.rpid}`);
-          log(`⏳ 限流 -509，${wait}ms 后重试（${attempt + 1}/${DELETE_MAX_RETRY - 1}）…`, 'warn');
+        if (j.code === -509 || j.code === -412 || j.code === -9000) {
+          const wait = (j.code === -509 ? 2000 : 3000) * (attempt + 1);
+          const why = j.code === -509 ? '限流 -509' : (j.message || `code=${j.code}`);
+          if (attempt + 1 >= DELETE_MAX_RETRY) {
+            result = 'fail';
+            setStatus(`${why}，已达重试上限 · rpid=${c.rpid}`);
+            log(`✗ rpid=${c.rpid} ${why}，重试后仍失败`, 'err');
+            break;
+          }
+          setStatus(`${why}，${Math.round(wait / 1000)}s 后重试 ${attempt + 1}/${DELETE_MAX_RETRY - 1} · rpid=${c.rpid}`);
+          log(`⏳ ${why}，${wait}ms 后重试（${attempt + 1}/${DELETE_MAX_RETRY - 1}）…`, 'warn');
           await sleep(wait); attempt++;
           continue;
         }
