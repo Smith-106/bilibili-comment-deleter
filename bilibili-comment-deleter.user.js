@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.70
+// @version      2.2.71
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.70';
+  const VERSION = '2.2.71';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -325,6 +325,7 @@
 
   /* ═══════════ 数据层 ═══════════ */
   let filledRows = 0;
+  let filledMeta = 0;
   function addIfAbsent(item) {
     if (!item || !item.rpid || !item.oid || !item.type) return false;
     if (rpidSet.has(item.rpid)) {
@@ -340,6 +341,12 @@
         cur.cut = true;
         filledRows++;
       }
+      let meta = false;
+      const nextRoot = Number(item.root) || 0;
+      if (!Number(cur.root) && nextRoot) { cur.root = nextRoot; meta = true; }
+      const nextTime = Number(item.ctime) || 0;
+      if (!Number(cur.ctime) && nextTime) { cur.ctime = nextTime; meta = true; }
+      if (meta) filledMeta++;
       return false;
     }
     comments.push(item);
@@ -427,6 +434,7 @@
     let hop = '';
     let stopReason = '';
     filledRows = 0;
+    filledMeta = 0;
     const spent = () => fmtDur(Date.now() - t0);
     const before = comments.length;
     const fresh = () => comments.length - before;
@@ -515,6 +523,7 @@
     let videoFail = 0;
     let cappedVideos = 0;
     filledRows = 0;
+    filledMeta = 0;
 
     try {
     while (seenAids.size < HISTORY_VIDEO_CAP && guard < 400) {
@@ -623,6 +632,7 @@
   /* ═══════════ 枚举三：离线 JSON 导入 ═══════════ */
   function importJson(raw) {
     filledRows = 0;
+    filledMeta = 0;
     let data;
     try { data = JSON.parse(raw); }
     catch (e) { return { ok: false, msg: 'JSON 解析失败：' + e.message }; }
@@ -647,7 +657,7 @@
     const extra = restored ? `，补回处理记录 ${restored}` : '';
     const partial = !Array.isArray(data) && data.exported != null && data.total != null && Number(data.exported) < Number(data.total);
     const scopeNote = partial ? `。这是筛选导出（${data.exported}/${data.total}），不是当时的全部` : '';
-    const fillNote = filledRows ? `，补全更短正文 ${filledRows}` : '';
+    const fillNote = `${filledRows ? `，补全更短正文 ${filledRows}` : ''}${filledMeta ? `，补上楼层或时间 ${filledMeta}` : ''}`;
     return { ok: true, msg: `导入完成：新增 ${added}，重复 ${dup}，无效 ${invalid}${fillNote}${extra}${scopeNote}` };
   }
 
@@ -1818,7 +1828,7 @@
       const aicuHead = aborted ? '已停止枚举' : aicu.stopReason ? 'AICU 枚举未完成' : '✅ AICU 枚举完成';
       const added = comments.length - had;
       const gap = (!aborted && aicu.total && aicu.got !== aicu.total) ? `索引报 ${aicu.total}，本次收下 ${aicu.got}。` : '';
-      const fillNote = filledRows ? `补全了 ${filledRows} 条原来更短的正文。` : '';
+      const fillNote = `${filledRows ? `补全了 ${filledRows} 条原来更短的正文。` : ''}${filledMeta ? `补上了 ${filledMeta} 条缺失的楼层或时间。` : ''}`;
       const aicuSum = `${aicuHead}：这次 +${added}，列表共 ${comments.length} 条（去重）。${fillNote}${aicu.stopReason || ''}${gap}索引可能滞后，不是官方实时列表。用时 ${fmtDur(Date.now() - t0)}。${aborted ? '后面的页没有继续。' : ''}${digestLine()}`;
       saveLastRun(aicuSum);
       setStatus(aicuSum);
@@ -1867,7 +1877,7 @@
       const added = comments.length - had;
       const videoNote = hist.videoFail ? `${hist.videoFail} 个视频没扫成。` : '';
       const moreNote = hist.cappedVideos ? `${hist.cappedVideos} 个视频后面还有评论，这次没翻。` : '';
-      const fillNote = filledRows ? `补全了 ${filledRows} 条原来更短的正文。` : '';
+      const fillNote = `${filledRows ? `补全了 ${filledRows} 条原来更短的正文。` : ''}${filledMeta ? `补上了 ${filledMeta} 条缺失的楼层或时间。` : ''}`;
       const histSum = `${histHead}：这次 +${added}，列表共 ${comments.length} 条。每视频最近 ${scanPages} 页，最多 ${HISTORY_VIDEO_CAP} 个视频。用时 ${fmtDur(Date.now() - t0)}。${fillNote}${hist.historyStop || ''}${videoNote}${moreNote}${aborted ? '后面的视频没有继续。' : ''}${digestLine()}`;
       saveLastRun(histSum);
       setStatus(histSum);
