@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.164
+// @version      2.2.165
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.164';
+  const VERSION = '2.2.165';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2018,6 +2018,7 @@
       saveSettings();
       const on = $el(`${P}-skipok`).checked;
       say(on ? '下次删除会跳过日志里已确认删除的。枚举仍会把它们列出来。' : '下次删除不再跳过已确认删除的，会再请求它们。');
+      updCount();
     });
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape' || !(deleting || fetching)) return;
@@ -2414,6 +2415,13 @@
     listEl.scrollTop = keep;
   }
 
+  function countDeletable(list, skipOk, stateOf) {
+    const rows = list || [];
+    if (!skipOk) return rows.length;
+    let n = 0;
+    for (const c of rows) if (stateOf(c) !== 'ok') n++;
+    return n;
+  }
   function updCount() {
     const shown = visibleComments();
     const vis = shown.filter((c) => c.oid && c.type);
@@ -2427,14 +2435,26 @@
       else if (st === 'fail') failN++;
       else if (st === 'uncertain') uncN++;
     }
-    const nDel = shown.filter((c) => c.oid && c.type && selected.has(c.rpid)).length;
+    const selRows = shown.filter((c) => c.oid && c.type && selected.has(c.rpid));
+    const skipBox = document.getElementById(`${P}-skipok`);
+    const skipOn = !!(skipBox && skipBox.checked);
+    const stateOf = (c) => jm.get(idExact(c.rpid));
+    const nDel = countDeletable(selRows, skipOn, stateOf);
+    const nAll = countDeletable(vis, skipOn, stateOf);
     const dsel = document.getElementById(`${P}-dsel`);
     const dall = document.getElementById(`${P}-dall`);
-    if (dsel) { dsel.disabled = !nDel || deleting || fetching || confirming; dsel.textContent = `🔥 删除选中 (${nDel})`; }
+    if (dsel) {
+      dsel.disabled = !nDel || deleting || fetching || confirming;
+      dsel.textContent = `🔥 删除选中 (${nDel})`;
+      const skippedSel = selRows.length - nDel;
+      dsel.title = skippedSel ? `另有 ${skippedSel} 条已确认删除，勾了跳过就不会再请求。` : '';
+    }
     if (dall) {
-      dall.disabled = !vis.length || deleting || fetching || confirming;
-      dall.textContent = `${filtersOn() ? '💣 删除当前' : '💣 删除全部'} (${vis.length})`;
-      dall.title = filtersOn() ? `只删除当前筛选里能删的评论（${filterBits().join('、')}），不会动被筛掉的` : '删除列表里能删的全部评论';
+      dall.disabled = !nAll || deleting || fetching || confirming;
+      dall.textContent = `${filtersOn() ? '💣 删除当前' : '💣 删除全部'} (${nAll})`;
+      const skippedAll = vis.length - nAll;
+      const scope = filtersOn() ? `只删除当前筛选里能删的评论（${filterBits().join('、')}），不会动被筛掉的。` : '删除列表里能删的全部评论。';
+      dall.title = scope + (skippedAll ? `另有 ${skippedAll} 条已确认删除，勾了跳过就不会再请求。` : '');
     }
     const copyBtn = document.getElementById(`${P}-copybad`);
     if (copyBtn) {
