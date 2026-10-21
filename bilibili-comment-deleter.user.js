@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.76
+// @version      2.2.77
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.76';
+  const VERSION = '2.2.77';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -329,11 +329,18 @@
   let filledMeta = 0;
   let rootClash = 0;
   let placeClash = 0;
+  let restoredMarks = 0;
   function resetFillStats() {
     filledRows = 0;
     filledMeta = 0;
     rootClash = 0;
     placeClash = 0;
+    restoredMarks = 0;
+  }
+  function flagOn(v) {
+    if (v === true || v === 1) return true;
+    const s = String(v == null ? '' : v).trim().toLowerCase();
+    return s === '1' || s === 'true' || s === 'yes' || s === '是';
   }
   function addIfAbsent(item) {
     if (!item || !item.rpid || !item.oid || !item.type) return false;
@@ -359,6 +366,10 @@
       }
       const nextTime = Number(item.ctime) || 0;
       if (!Number(cur.ctime) && nextTime) { cur.ctime = nextTime; meta = true; }
+      let marked = false;
+      if (item.placeClash && !cur.placeClash) { cur.placeClash = true; marked = true; }
+      if (item.rootConflict && !cur.rootConflict) { cur.rootConflict = true; marked = true; }
+      if (marked) restoredMarks++;
       const nextOid = Number(item.oid) || 0;
       const nextType = Number(item.type) || 0;
       if (!cur.placeClash && ((nextOid && Number(cur.oid) !== nextOid) || (nextType && Number(cur.type) !== nextType))) {
@@ -406,7 +417,9 @@
       oid,
       type,
       message: clip.message,
-      cut: clip.cut,
+      cut: clip.cut || flagOn(it && it.cut),
+      placeClash: flagOn(it && it.placeClash),
+      rootConflict: flagOn(it && it.rootConflict),
       ctime: Number((it && (it.time || it.ctime)) || 0) || 0,
       root: parent.rootid ? Number(parent.rootid) : (Number(it && it.root) || 0),
       src: 'aicu',
@@ -673,7 +686,7 @@
     const extra = restored ? `，补回处理记录 ${restored}` : '';
     const partial = !Array.isArray(data) && data.exported != null && data.total != null && Number(data.exported) < Number(data.total);
     const scopeNote = partial ? `。这是筛选导出（${data.exported}/${data.total}），不是当时的全部` : '';
-    const fillNote = `${filledRows ? `，补全更短正文 ${filledRows}` : ''}${filledMeta ? `，补上楼层或时间 ${filledMeta}` : ''}${rootClash ? `，${rootClash} 条楼层和后一次不一致，仍用先看到的` : ''}${placeClash ? `，${placeClash} 条的 oid 或类型和后一次不一致，删除仍用先看到的` : ''}`;
+    const fillNote = `${filledRows ? `，补全更短正文 ${filledRows}` : ''}${filledMeta ? `，补上楼层或时间 ${filledMeta}` : ''}${rootClash ? `，${rootClash} 条楼层和后一次不一致，仍用先看到的` : ''}${placeClash ? `，${placeClash} 条的 oid 或类型和后一次不一致，删除仍用先看到的` : ''}${restoredMarks ? `，恢复冲突标记 ${restoredMarks}` : ''}`;
     return { ok: true, msg: `导入完成：新增 ${added}，重复 ${dup}，无效 ${invalid}${fillNote}${extra}${scopeNote}` };
   }
 
@@ -719,6 +732,9 @@
       ctime: col(cols, 'ctime'),
       root: col(cols, 'root'),
       state: col(cols, 'state'),
+      cut: col(cols, 'cut'),
+      placeClash: col(cols, 'placeClash'),
+      rootConflict: col(cols, 'rootConflict'),
     }));
     return importJson(JSON.stringify(replies));
   }
@@ -955,9 +971,9 @@
       blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
       name = `bili-comments${tag}-${Date.now()}.json`;
     } else {
-      const head = 'rpid,oid,type,typeText,message,ctime,ctimeText,root,src,state';
+      const head = 'rpid,oid,type,typeText,message,ctime,ctimeText,root,src,state,cut,placeClash,rootConflict';
       const rows = stamped.map((c) =>
-        [c.rpid, c.oid, c.type, typeText(c.type), c.message, c.ctime, fmtTime(c.ctime), c.root, SRC_TEXT[c.src] || c.src, c.state].map(csvCell).join(',')
+        [c.rpid, c.oid, c.type, typeText(c.type), c.message, c.ctime, fmtTime(c.ctime), c.root, SRC_TEXT[c.src] || c.src, c.state, c.cut ? 1 : 0, c.placeClash ? 1 : 0, c.rootConflict ? 1 : 0].map(csvCell).join(',')
       ).join('\r\n');
       blob = new Blob(['\ufeff' + head + '\r\n' + rows], { type: 'text/csv;charset=utf-8' });
       name = `bili-comments${tag}-${Date.now()}.csv`;
@@ -968,7 +984,7 @@
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 3000);
     const scope = filtersOn() ? `当前筛选 ${list.length}/${comments.length}` : String(list.length);
-    setStatus(`已导出 ${scope} 条（${kind.toUpperCase()}，含处理结果列）。${partial ? '文件名带 part，JSON 里写明这不是全部。' : ''}`);
+    setStatus(`已导出 ${scope} 条（${kind.toUpperCase()}，含处理结果、截断和冲突标记）。${partial ? '文件名带 part，JSON 里写明这不是全部。' : ''}`);
     log(`已导出 ${scope} 条（${kind.toUpperCase()}）`, 'ok');
   }
 
