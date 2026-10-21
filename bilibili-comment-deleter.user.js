@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.31
+// @version      2.2.32
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.31';
+  const VERSION = '2.2.32';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -96,6 +96,27 @@
     const m = Math.floor(s / 60);
     const r = s % 60;
     return r ? `${m} 分 ${r} 秒` : `${m} 分`;
+  }
+  function fmtAgo(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return `${s} 秒`;
+    const m = Math.round(s / 60);
+    if (m < 60) return `${m} 分`;
+    const h = Math.round(m / 60);
+    if (h < 48) return `${h} 小时`;
+    return `${Math.round(h / 24)} 天`;
+  }
+  function saveLastRun(text) {
+    try {
+      localStorage.setItem(`${P}_lastrun`, JSON.stringify({ t: Date.now(), text: String(text).slice(0, 400) }));
+    } catch (e) { /* 存不下就只留在这一页 */ }
+  }
+  function lastRunNote() {
+    try {
+      const o = JSON.parse(localStorage.getItem(`${P}_lastrun`) || 'null');
+      if (!o || !o.text) return '';
+      return ` 上次（${fmtAgo(Date.now() - (o.t || Date.now()))}前）：${o.text}`;
+    } catch (e) { return ''; }
   }
 
   function fmtTime(t) {
@@ -1262,7 +1283,7 @@
     const uid = getCookie('DedeUserID');
     journalNormalize();
     const remembered = journalStats();
-    const mem = (remembered.n ? ` 本地记录 ${remembered.n} 条（已确认 ${remembered.ok}，未成功 ${remembered.bad}）。` : '') + journalCompactNote;
+    const mem = (remembered.n ? ` 本地记录 ${remembered.n} 条（已确认 ${remembered.ok}，未成功 ${remembered.bad}）。` : '') + journalCompactNote + lastRunNote();
     if (csrf && uid) setStatus(`已登录 UID=${uid}，bili_jct 就绪。删除不可逆，请谨慎。${mem}`);
     else setStatus(`⚠️ 未检测到登录态（请先在 bilibili.com 登录后刷新）。可先导入/浏览，删除需登录。${mem}`);
     renderList(); updCount();
@@ -1554,9 +1575,12 @@
       await fetchAicuComments(myUid);
       renderList(); updCount();
       const aicuHead = aborted ? '已停止枚举' : '✅ AICU 枚举完成';
-      setStatus(`${aicuHead}：累计 ${comments.length} 条（去重）。用时 ${fmtDur(Date.now() - t0)}。${aborted ? '后面的页没有继续。' : ''}${digestLine()}`);
+      const aicuSum = `${aicuHead}：累计 ${comments.length} 条（去重）。用时 ${fmtDur(Date.now() - t0)}。${aborted ? '后面的页没有继续。' : ''}${digestLine()}`;
+      saveLastRun(aicuSum);
+      setStatus(aicuSum);
       log(`${aicuHead}，累计 ${comments.length} 条`, aborted ? 'warn' : 'ok');
     } catch (e) {
+      saveLastRun(`枚举失败：${e.message}`);
       setStatus(`❌ 枚举失败：${e.message}`);
       log(`枚举失败: ${e.message}`, 'err');
     } finally {
@@ -1586,9 +1610,12 @@
       await fetchHistoryComments(myUid, scanPages);
       renderList(); updCount();
       const histHead = aborted ? '已停止扫描' : '✅ 官方扫描完成';
-      setStatus(`${histHead}：累计 ${comments.length} 条。用时 ${fmtDur(Date.now() - t0)}。${aborted ? '后面的视频没有继续。' : ''}${digestLine()}`);
+      const histSum = `${histHead}：累计 ${comments.length} 条。用时 ${fmtDur(Date.now() - t0)}。${aborted ? '后面的视频没有继续。' : ''}${digestLine()}`;
+      saveLastRun(histSum);
+      setStatus(histSum);
       log(histHead, aborted ? 'warn' : 'ok');
     } catch (e) {
+      saveLastRun(`官方扫描失败：${e.message}`);
       setStatus(`❌ 官方扫描失败：${e.message}`);
       log(`官方扫描失败: ${e.message}`, 'err');
     } finally {
@@ -1837,6 +1864,7 @@
     const stopBits = [unsent ? `未请求 ${unsent}` : '', recheckLeft ? `回查未完成 ${recheckLeft}` : ''].filter(Boolean).join('，');
     const skipBit = skippedOk ? `跳过已确认 ${skippedOk}。` : '';
     const sum = `${aborted ? '已停止。' : '完成：'}确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}${shadowFixed ? `（影子重试救回 ${shadowFixed}）` : ''}。用时 ${sec}s。${skipBit}${stopBits ? stopBits + '。' : ''}${focusNote}`;
+    saveLastRun(sum);
     setStatus(sum);
     log(`==== ${sum} ====`, fail ? 'warn' : 'ok');
     deleting = false;
