@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.119
+// @version      2.2.120
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.119';
+  const VERSION = '2.2.120';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -554,8 +554,9 @@
 
       const replies = (data.data && data.data.replies) || [];
       if (!replies.length) {
-        if (data.data && data.data.cursor && data.data.cursor.is_end) log('AICU 数据已全部获取');
-        else {
+        if (data.data && data.data.cursor && data.data.cursor.is_end) {
+          if (total && got !== total) log(`AICU 说已经结束，但索引 ${total} 条，这次收下 ${got} 条。`, 'warn');
+        } else {
           stopReason = '这一页是空的，但索引没说已经结束。后面的页没有继续。';
           log(stopReason, 'warn');
         }
@@ -573,7 +574,10 @@
       touchList(true);
       if (total) setProg(Math.min(fresh(), total), total, '枚举');
 
-      if (data.data && data.data.cursor && data.data.cursor.is_end) break;
+      if (data.data && data.data.cursor && data.data.cursor.is_end) {
+        if (total && got !== total) log(`AICU 说已经结束，但索引 ${total} 条，这次收下 ${got} 条。`, 'warn');
+        break;
+      }
       const waitUntil = Date.now() + AICU_DELAY;
       const donePage = page;
       startBeat(() => `第 ${donePage} 页完成 · ${host} · 这次 +${fresh()}${total ? '/' + total : ''} · 本页 +${added}${skipped ? ` · 跳过 ${skipped}` : ''} · ${Math.max(0, Math.ceil((waitUntil - Date.now()) / 1000))}s 后下一页 · 已用 ${spent()}`);
@@ -676,9 +680,6 @@
       startBeat(() => `${videoNote || `视频 ${doneAt}/${aids.length} 完成`}${running ? ` · 累计 ${running}` : ''} · ${Math.max(0, Math.ceil((waitUntil - Date.now()) / 1000))}s 后下一个 · 这次 +${fresh()} · 列表 ${comments.length} 条 · 已用 ${spent()}${videoFail ? ` · 失败 ${videoFail}` : ''}`);
       await sleep(HISTORY_VIDEO_DELAY);
     }
-    const capBit = cappedVideos ? `，${cappedVideos} 个视频后面还有评论，这次没翻` : '';
-    const threadBit = threadGapText(threadSkipped, threadMore, threadFail);
-    log(`官方历史扫描结束，这次 +${fresh()}，列表共 ${comments.length} 条${videoFail ? `，${videoFail} 个视频失败` : ''}${capBit}${threadBit ? `，${threadBit}` : ''}${historyStop ? `。${historyStop}` : ''}`, videoFail || historyStop || cappedVideos || threadBit ? 'warn' : 'ok');
     return { historyStop, videoFail, cappedVideos, threadSkipped, threadMore, threadFail };
     } finally { stopBeat(); }
   }
@@ -2171,7 +2172,7 @@
       saveLastRun(aicuSum);
       setStatus(aicuSum);
       const aicuWhy = `${aicu.stopReason || ''}${gap}`;
-      log(`${aicuHead}，这次 +${added}，列表共 ${comments.length} 条${aicuWhy ? `。${aicuWhy}` : ''}`, aborted || aicuWhy ? 'warn' : 'ok');
+      log(`${aicuHead}，这次 +${added}，列表共 ${comments.length} 条${aicuWhy ? `。${aicuWhy}` : ''}${fillNote ? ` ${fillNote}` : ''}`, aborted || aicuWhy ? 'warn' : 'ok');
     } catch (e) {
       stopBeat();
       const added = comments.length - had;
@@ -2223,7 +2224,7 @@
       saveLastRun(histSum);
       setStatus(histSum);
       const histWhy = `${hist.historyStop || ''}${videoNote}${moreNote}${threadNote ? `${threadNote}。` : ''}`;
-      log(`${histHead}，这次 +${added}，列表共 ${comments.length} 条${histWhy ? `。${histWhy}` : ''}`, aborted || histWhy ? 'warn' : 'ok');
+      log(`${histHead}，这次 +${added}，列表共 ${comments.length} 条${histWhy ? `。${histWhy}` : ''}${fillNote ? ` ${fillNote}` : ''}`, aborted || histWhy ? 'warn' : 'ok');
     } catch (e) {
       stopBeat();
       const added = comments.length - had;
