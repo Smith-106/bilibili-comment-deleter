@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.93
+// @version      2.2.94
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.93';
+  const VERSION = '2.2.94';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -669,17 +669,43 @@
     let guard = 0;
     let hiddenThreads = 0;
     let openedThreads = 0;
-    const done = (capped) => {
+    let capped = false;
+    const queued = new Set();
+    const later = [];
+    const done = (cappedNow) => {
       if (pace) pace.thread = '';
-      return { capped, hiddenThreads };
+      return { capped: cappedNow, hiddenThreads };
     };
+    async function openNow(list) {
+      let n = 0;
+      let addedN = 0;
+      for (let i = 0; i < list.length; i++) {
+        if (aborted) { hiddenThreads += list.length - i; break; }
+        const item = list[i];
+        if (openedThreads >= HISTORY_THREAD_OPEN_MAX) { hiddenThreads++; continue; }
+        openedThreads++;
+        n++;
+        if (pace) pace.thread = `补楼 ${item.rootId}`;
+        try {
+          const extra = await pullOwnThreadPage(aid, item.rootId, mid);
+          addedN += extra.added || 0;
+          if (extra.more) hiddenThreads++;
+        } catch (e) {
+          hiddenThreads++;
+          log(`楼 ${item.rootId} 第一页没补上: ${e.message}`, 'warn');
+        }
+        await sleep(400);
+      }
+      if (pace) pace.thread = '';
+      return { n, addedN };
+    }
     while (guard < scanPages) {
       guard++;
-      if (aborted) return done(false);
+      if (aborted) { hiddenThreads += later.length; return done(false); }
       const d = await gmGetJSON(`https://api.bilibili.com/x/v2/reply/main?type=1&oid=${aid}&mode=2&next=${nextPage}`);
       if (d.code !== 0) throw new Error(`av${aid} 评论接口 code=${d.code}`);
       let added = 0;
-      let pageOpened = 0;
+      const pageFirst = [];
       const tops = (d.data && d.data.replies) || [];
       for (const top of tops) {
         const preview = Array.isArray(top.replies) ? top.replies : [];
@@ -705,35 +731,26 @@
         }
         const rcount = Number(top.rcount);
         const rootId = Number(top.rpid) || 0;
-        if (rcount > preview.length && rootId) {
-          if (openedThreads >= HISTORY_THREAD_OPEN_MAX) hiddenThreads++;
-          else {
-            openedThreads++;
-            pageOpened++;
-            if (pace) pace.thread = `补楼 ${rootId}`;
-            try {
-              const extra = await pullOwnThreadPage(aid, rootId, mid);
-              added += extra.added || 0;
-              if (extra.more) hiddenThreads++;
-            } catch (e) {
-              hiddenThreads++;
-              log(`楼 ${rootId} 第一页没补上: ${e.message}`, 'warn');
-            }
-            if (aborted) return done(false);
-            await sleep(400);
-          }
+        if (rcount > preview.length && rootId && !queued.has(rootId)) {
+          queued.add(rootId);
+          const seen = preview.some((s) => Number(s.mid) === mid);
+          (seen ? later : pageFirst).push({ rootId });
         }
       }
-      if (pace) pace.thread = '';
-      log(`  aid=${aid} 第${guard}页 +${added}${pageOpened ? `，补楼 ${pageOpened}` : ''}`, 'info');
+      log(`  aid=${aid} 第${guard}页 +${added}`, 'info');
+      const opened = await openNow(pageFirst);
+      if (opened.n) log(`  aid=${aid} 第${guard}页补楼 ${opened.n}（预览里没有自己），+${opened.addedN}`, 'info');
+      if (aborted) { hiddenThreads += later.length; return done(capped); }
       const c = (d.data && d.data.cursor) || {};
-      if (c.is_end) return done(false);
-      if (typeof c.next !== 'number' || c.next === nextPage) return done(false);
-      if (guard >= scanPages) return done(true);
+      if (c.is_end) break;
+      if (typeof c.next !== 'number' || c.next === nextPage) break;
+      if (guard >= scanPages) { capped = true; break; }
       nextPage = c.next;
       await sleep(500);
     }
-    return done(false);
+    const rest = await openNow(later);
+    if (rest.n) log(`  aid=${aid} 补楼 ${rest.n}（预览里已经有自己），+${rest.addedN}`, 'info');
+    return done(capped);
   }
 
   /* ═══════════ 枚举三：离线 JSON 导入 ═══════════ */
@@ -1206,7 +1223,7 @@
       <div class="${P}-sec">
         <div class="${P}-row">
           <button class="${P}-btn ${P}-btn-p" id="${P}-load" title="第三方索引，不是官方实时列表。已删的可能还在，刚发的可能没有。删除仍走官方接口">📥 AICU 获取</button>
-          <button class="${P}-btn" id="${P}-hist" title="翻观看历史，逐视频扫自己的评论。不是全量：只扫下面页数，最多 ${HISTORY_VIDEO_CAP} 个视频。楼中楼先看预览；回复比预览多的楼，每视频最多再补 ${HISTORY_THREAD_OPEN_MAX} 条楼的第一页">🏛️ 官方历史</button>
+          <button class="${P}-btn" id="${P}-hist" title="翻观看历史，逐视频扫自己的评论。不是全量：只扫下面页数，最多 ${HISTORY_VIDEO_CAP} 个视频。楼中楼先看预览；回复比预览多的楼，每视频最多再补 ${HISTORY_THREAD_OPEN_MAX} 条楼的第一页，名额先给预览里没有自己的楼">🏛️ 官方历史</button>
           <span style="color:var(--c-sub);font-size:12px">每视频</span>
           <input class="${P}-input" type="number" id="${P}-scanpages" value="${Math.max(1, Math.min(10, Number(localStorage.getItem(`${P}_scanpages`)) || VIDEO_SCAN_PAGES_DEFAULT))}" min="1" max="10" step="1" title="每个视频只扫最近这么多页。默认 2。调大更慢，也更不容易漏掉较早的评论">
           <span style="color:var(--c-sub);font-size:12px">页</span>
