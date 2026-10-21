@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.88
+// @version      2.2.89
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.88';
+  const VERSION = '2.2.89';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1165,7 +1165,7 @@
           <input class="${P}-input" type="number" id="${P}-delay" value="${DELAY_DEFAULT}" min="200" max="5000" step="50" title="两条删除之间的间隔，200 到 5000 毫秒。超出范围会改回边界">
           <span style="color:var(--c-sub);font-size:12px">ms</span>
         </div>
-        <label><input type="checkbox" id="${P}-recheck" checked> 删除后官方单条确认（不信 code=0；仍在则自动降速重试）</label>
+        <label><input type="checkbox" id="${P}-recheck" checked title="关掉之后，接口受理的只记为待确认，不算已删。下次删除才生效。"> 删除后官方单条确认（不信 code=0；仍在则自动降速重试）</label>
         <label><input type="checkbox" id="${P}-skipok" checked> 跳过日志里已确认删除的（下次删除不再请求这些，枚举仍会列出）</label>
       </div>
       <div class="${P}-strip">
@@ -1499,7 +1499,11 @@
       e.preventDefault();
       e.returnValue = '';
     });
-    $el(`${P}-recheck`).addEventListener('change', saveSettings);
+    $el(`${P}-recheck`).addEventListener('change', () => {
+      saveSettings();
+      const on = $el(`${P}-recheck`).checked;
+      say(on ? '回查已打开。下次删除会再向官方确认，仍在则降速重试。' : '回查已关闭。下次删除里，接口受理的只记为待确认，不算已删。');
+    });
     $el(`${P}-skipok`).addEventListener('change', () => {
       saveSettings();
       const on = $el(`${P}-skipok`).checked;
