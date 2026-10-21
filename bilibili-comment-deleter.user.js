@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.146
+// @version      2.2.147
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.146';
+  const VERSION = '2.2.147';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -535,10 +535,14 @@
   }
   function replyText(it) {
     if (!it) return '';
-    if (it.message != null && String(it.message).trim() !== '') return it.message;
-    const content = it.content;
-    if (content && content.message != null) return content.message;
-    return '';
+    let text = '';
+    if (it.message != null && String(it.message).trim() !== '') text = it.message;
+    else if (it.content && it.content.message != null && String(it.content.message).trim() !== '') text = it.content.message;
+    if (String(text).trim()) return text;
+    const content = it.content || {};
+    const pics = Array.isArray(content.pictures) ? content.pictures.length
+      : (Array.isArray(it.pictures) ? it.pictures.length : 0);
+    return pics ? `[图片${pics}张]` : '';
   }
 
   /** aicu 条目、原始单页，或本工具自己导出的扁对象 → 规范对象 */
