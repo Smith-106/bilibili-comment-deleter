@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.23
+// @version      2.2.24
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.23';
+  const VERSION = '2.2.24';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1402,8 +1402,9 @@
       datasetUid = myUid;
       await fetchAicuComments(myUid);
       renderList(); updCount();
-      setStatus(`✅ AICU 枚举完成：累计 ${comments.length} 条（去重）。${digestLine()}`);
-      log(`✅ AICU 枚举完成，累计 ${comments.length} 条`, 'ok');
+      const aicuHead = aborted ? '已停止枚举' : '✅ AICU 枚举完成';
+      setStatus(`${aicuHead}：累计 ${comments.length} 条（去重）。${aborted ? '后面的页没有继续。' : ''}${digestLine()}`);
+      log(`${aicuHead}，累计 ${comments.length} 条`, aborted ? 'warn' : 'ok');
     } catch (e) {
       setStatus(`❌ 枚举失败：${e.message}`);
       log(`枚举失败: ${e.message}`, 'err');
@@ -1432,8 +1433,9 @@
       log(`开始官方历史扫描 UID=${myUid}（每视频 ${scanPages} 页）`);
       await fetchHistoryComments(myUid, scanPages);
       renderList(); updCount();
-      setStatus(`✅ 官方扫描完成：累计 ${comments.length} 条。${digestLine()}`);
-      log(`✅ 官方历史扫描完成`, 'ok');
+      const histHead = aborted ? '已停止扫描' : '✅ 官方扫描完成';
+      setStatus(`${histHead}：累计 ${comments.length} 条。${aborted ? '后面的视频没有继续。' : ''}${digestLine()}`);
+      log(histHead, aborted ? 'warn' : 'ok');
     } catch (e) {
       setStatus(`❌ 官方扫描失败：${e.message}`);
       log(`官方扫描失败: ${e.message}`, 'err');
@@ -1517,10 +1519,11 @@
     const t0 = Date.now();
     log(`🔥 开始删除 ${targets.length} 条（${scope}），间隔 ${delay}ms，回查${recheckOn ? '开' : '关'}`, 'warn');
 
-    let ok = 0, fail = 0, uncertain = 0, shadowFixed = 0;
+    let ok = 0, fail = 0, uncertain = 0, shadowFixed = 0, seen = 0, recheckLeft = 0;
     const pending = [];           // 已提交删除、留待统一回查的条目
     for (let i = 0; i < targets.length; i++) {
       if (aborted) { log('⏹ 已停止', 'warn'); break; }
+      seen++;
       const c = targets[i];
       markActive(c.rpid);
       setProg(i, targets.length, '①删除');
@@ -1592,7 +1595,7 @@
       setStatus(`②回查 0/${pending.length} · 官方单条确认中…`);
       log(`🔍 统一回查 ${pending.length} 条（先 /reply/detail 单条；不可用才全区/整楼翻页）`);
       for (let i = 0; i < pending.length; i++) {
-        if (aborted) break;
+        if (aborted) { recheckLeft = pending.length - i; break; }
         const c = pending[i];
         markActive(c.rpid);
         setProg(i, pending.length, '②回查');
@@ -1672,7 +1675,9 @@
       if (sel) sel.value = 'uncertain';
       focusNote = ' 列表已切到「待确认」。';
     }
-    const sum = `${aborted ? '已停止。' : '完成：'}确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}${shadowFixed ? `（影子重试救回 ${shadowFixed}）` : ''}。用时 ${sec}s。${focusNote}`;
+    const unsent = targets.length - seen;
+    const stopBits = [unsent ? `未请求 ${unsent}` : '', recheckLeft ? `回查未完成 ${recheckLeft}` : ''].filter(Boolean).join('，');
+    const sum = `${aborted ? '已停止。' : '完成：'}确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}${shadowFixed ? `（影子重试救回 ${shadowFixed}）` : ''}。用时 ${sec}s。${stopBits ? stopBits + '。' : ''}${focusNote}`;
     setStatus(sum);
     log(`==== ${sum} ====`, fail ? 'warn' : 'ok');
     deleting = false;
