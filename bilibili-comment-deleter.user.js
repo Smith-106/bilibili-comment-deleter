@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.11
+// @version      2.2.12
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.11';
+  const VERSION = '2.2.12';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -52,6 +52,7 @@
   const rpidSet = new Set();          // O(1) 去重索引
   let datasetUid = '';                // 枚举时所属 UID（防换号误解）
   let selected = new Set();
+  let anchorRpid = 0;
   let filterKw = '';                  // 关键词
   let filtSrc = 'all';
   let filtType = 'all';
@@ -674,7 +675,7 @@
       .${P}-list::-webkit-scrollbar-thumb{background:rgba(128,128,128,.4);border-radius:3px}
       .${P}-empty{padding:28px 18px;text-align:center;color:var(--c-sub2);font-size:13px}
       .${P}-item{display:flex;align-items:flex-start;gap:8px;padding:8px 18px;border-bottom:1px solid var(--c-rowbd);
-        font-size:12px;transition:background .12s}
+        font-size:12px;transition:background .12s;cursor:pointer}
       .${P}-item:hover{background:var(--c-hover)}
       .${P}-item.${P}-hot{background:rgba(0,161,214,.18);box-shadow:inset 0 0 0 1px rgba(0,161,214,.55)}
       @media (prefers-reduced-motion: reduce){ .${P}-item{transition:none} }
@@ -779,7 +780,7 @@
            <label>排序 <select class="${P}-sel" id="${P}-sortsel">
             <option value="default">默认</option><option value="tasc">时间↑</option><option value="tdesc">时间↓</option>
           </select></label>
-          <button class="${P}-btn" id="${P}-selall" style="padding:4px 10px">全选</button>
+          <button class="${P}-btn" id="${P}-selall" style="padding:4px 10px" title="勾选当前筛选。按住 Shift 再点两行，会连选中间">全选</button>
           <button class="${P}-btn" id="${P}-selnone" style="padding:4px 10px">全不选</button>
           <button class="${P}-btn" id="${P}-expj" title="导出当前筛选下列表为 JSON（删除前备份）">💾JSON</button>
           <button class="${P}-btn" id="${P}-expc" title="导出当前筛选下列表为 CSV">💾CSV</button>
@@ -898,15 +899,41 @@
     const listEl = $el(`${P}-list`);
     listEl.addEventListener('change', (e) => {
       if (!e.target.matches('input[type="checkbox"]')) return;
+      if (e.target.dataset.skip === '1') { e.target.dataset.skip = ''; return; }
       const rpid = Number(e.target.dataset.rpid);
       e.target.checked ? selected.add(rpid) : selected.delete(rpid);
       updCount();
     });
     listEl.addEventListener('click', (e) => {
       const jb = e.target.closest('button[data-act="jump"]');
-      if (!jb) return;
-      const c = comments.find((x) => x.rpid === Number(jb.dataset.rpid));
-      if (c) jumpTo(c);
+      if (jb) {
+        const c = comments.find((x) => x.rpid === Number(jb.dataset.rpid));
+        if (c) jumpTo(c);
+        return;
+      }
+      if (e.target.closest('a')) return;
+      const row = e.target.closest(`.${P}-item`);
+      if (!row) return;
+      const rpid = Number(row.dataset.rpid);
+      if (!rpid) return;
+      const textSel = window.getSelection && String(window.getSelection());
+      if (textSel) return;
+      if (e.shiftKey && anchorRpid) {
+        if (e.target.matches('input[type="checkbox"]')) {
+          e.preventDefault();
+          e.target.dataset.skip = '1';
+          setTimeout(() => { e.target.dataset.skip = ''; }, 0);
+        }
+        selectRange(anchorRpid, rpid);
+        return;
+      }
+      if (e.target.matches('input[type="checkbox"]')) { anchorRpid = rpid; return; }
+      const box = row.querySelector('input[type="checkbox"]');
+      const on = !(box ? box.checked : selected.has(rpid));
+      if (box) box.checked = on;
+      on ? selected.add(rpid) : selected.delete(rpid);
+      anchorRpid = rpid;
+      updCount();
     });
 
     /* —— 面板拖拽（位置记忆 + 越界复位） —— */
@@ -985,6 +1012,25 @@
   }
 
   /* ═══════════ 视图/筛选 ═══════════ */
+  function selectRange(a, b) {
+    const list = (viewSnap && viewSnap.length) ? viewSnap : visibleComments();
+    const ia = list.findIndex((c) => c.rpid === a);
+    const ib = list.findIndex((c) => c.rpid === b);
+    if (ia < 0 || ib < 0) return;
+    const lo = Math.min(ia, ib);
+    const hi = Math.max(ia, ib);
+    let n = 0;
+    for (let i = lo; i <= hi; i++) {
+      const c = list[i];
+      if (!c.oid || !c.type) continue;
+      selected.add(c.rpid);
+      n++;
+    }
+    anchorRpid = b;
+    renderList();
+    setStatus(`已连选 ${n} 条（当前筛选内，含两端）。`);
+  }
+
   function filtersOn() {
     return !!(filterKw || filtSrc !== 'all' || filtType !== 'all' || filtState !== 'all');
   }
