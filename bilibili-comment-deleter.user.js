@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.80
+// @version      2.2.81
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.80';
+  const VERSION = '2.2.81';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1273,9 +1273,19 @@
     $el(`${P}-filter`).onclick = onFilter;
     $el(`${P}-clearf`).onclick = () => { $el(`${P}-kw`).value = ''; onFilter(); };
     $el(`${P}-kw`).addEventListener('keydown', (e) => { if (e.key === 'Enter') onFilter(); });
-    $el(`${P}-srcsel`).onchange = () => { filtSrc = $el(`${P}-srcsel`).value; renderList(); updCount(); };
-    $el(`${P}-typesel`).onchange = () => { filtType = $el(`${P}-typesel`).value; renderList(); updCount(); };
-    $el(`${P}-statesel`).onchange = () => { filtState = $el(`${P}-statesel`).value; renderList(); updCount(); };
+    $el(`${P}-srcsel`).onchange = () => {
+      filtSrc = $el(`${P}-srcsel`).value;
+      reportFilter(`来源：${filtSrc === 'all' ? '全部' : (SRC_TEXT[filtSrc] || filtSrc)}`);
+    };
+    $el(`${P}-typesel`).onchange = () => {
+      filtType = $el(`${P}-typesel`).value;
+      reportFilter(`类型：${filtType === 'all' ? '全部' : typeText(filtType)}`);
+    };
+    $el(`${P}-statesel`).onchange = () => {
+      filtState = $el(`${P}-statesel`).value;
+      const stateName = { all: '全部', ok: '已删除', fail: '未生效', uncertain: '待确认', none: '未处理', bad: '未成功' };
+      reportFilter(`结果：${stateName[filtState] || filtState}`);
+    };
     $el(`${P}-clashonly`).onchange = () => {
       onlyClash = $el(`${P}-clashonly`).checked;
       renderList(); updCount();
@@ -1290,7 +1300,7 @@
       saveSettings();
       renderList(); updCount();
       const name = { default: '默认', tasc: '时间从早到晚', tdesc: '时间从晚到早' };
-      setStatus(`已按${name[sortMode] || '默认'}排序。换页之后还是这个顺序。`);
+      say(`已按${name[sortMode] || '默认'}排序。换页之后还是这个顺序。当前 ${visibleComments().length} 条。`);
     };
     $el(`${P}-selall`).onclick = () => {
       const outside = outsideSelected();
@@ -1873,6 +1883,12 @@
       if (clashAll) tips.push(`整份列表里有 ${clashAll} 条位置、楼层或来源冲突。勾选「只看冲突」可以单独看。`);
       cnt.title = tips.join('');
     }
+  }
+
+  function reportFilter(text) {
+    renderList();
+    updCount();
+    say(`${text}，当前 ${visibleComments().length} 条。`);
   }
 
   function onFilter(live) {
