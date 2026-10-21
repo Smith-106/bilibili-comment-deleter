@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.148
+// @version      2.2.149
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.148';
+  const VERSION = '2.2.149';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1071,6 +1071,10 @@
   const RECHECK_WALK_DELAY = 250;   // walk 翻页间隔
 
   /** 全量走完一个评论区：{map: Map(rpid→rootStr|''), complete, pages} */
+  function replyAuthWhy(code) {
+    if (code === -101 || code === -111) return ERR_TEXT[String(code)] || `code=${code}`;
+    return '';
+  }
   function areaTops(data) {
     const d = data || {};
     const out = [];
@@ -1104,10 +1108,10 @@
         log(`回查 walk 失败 oid=${oid}: ${walkError}`, 'warn');
         break;
       }
-      if (d.code === -101 || d.code === -111) {
-        const why = ERR_TEXT[String(d.code)] || `code=${d.code}`;
-        log(`回查 walk ${why} oid=${oid}`, 'err');
-        return { map, complete: false, pages, auth: why };
+      const authWhy = replyAuthWhy(d.code);
+      if (authWhy) {
+        log(`回查 walk ${authWhy} oid=${oid}`, 'err');
+        return { map, complete: false, pages, auth: authWhy };
       }
       if (d.code !== 0) {
         walkError = `code=${d.code}`;
@@ -1150,6 +1154,11 @@
         walkError = e.message || '网络错误';
         log(`楼层 walk 失败 root=${root}: ${walkError}`, 'warn');
         break;
+      }
+      const authWhy = replyAuthWhy(d.code);
+      if (authWhy) {
+        log(`楼层 walk ${authWhy} root=${root}`, 'err');
+        return { set, complete: false, auth: authWhy };
       }
       if (d.code !== 0) {
         walkError = `code=${d.code}`;
@@ -1219,6 +1228,7 @@
       if (!area.map.has(String(c.root))) return { state: 'ok', why: '根楼层已不存在，子评必然已删' };
       const th = await walkThread(c.oid, c.type, c.root);
       if (th.set.has(String(c.rpid))) return { state: 'fail', why: '楼内仍在' };
+      if (th.auth) return { state: 'auth', why: th.auth };
       if (!th.complete) return { state: 'uncertain', why: explain(`楼内翻页未走完(≤${RECHECK_SUB_MAX}页)`, th.walkError ? `楼内翻页失败：${th.walkError}` : '') };
       return { state: 'ok', why: `整楼未发现(根=${c.root})` };
     }
