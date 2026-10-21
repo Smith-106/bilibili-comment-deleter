@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.161
+// @version      2.2.162
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.161';
+  const VERSION = '2.2.162';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2143,18 +2143,46 @@
     take('oid', raw);
     return hits;
   }
+  function looseFold(s) {
+    return [...String(s || '')].filter((ch) => !/\s/.test(ch)).join('').toLowerCase();
+  }
+  function looseHits(src, q, limit) {
+    const needle = looseFold(q);
+    if (!needle) return [];
+    const chars = [...String(src || '')];
+    const at = [];
+    let folded = '';
+    for (let i = 0; i < chars.length; i++) {
+      if (/\s/.test(chars[i])) continue;
+      for (const p of [...chars[i].toLowerCase()]) {
+        folded += p;
+        at.push(i);
+      }
+    }
+    const hits = [];
+    const cap = limit || 80;
+    let from = 0;
+    while (hits.length < cap) {
+      const hit = folded.indexOf(needle, from);
+      if (hit < 0) break;
+      hits.push([at[hit], at[hit + [...needle].length - 1]]);
+      from = hit + [...needle].length;
+    }
+    return hits;
+  }
   function reasonHit(c, q) {
-    const needle = String(q || '').toLowerCase();
+    const needle = looseFold(q);
     if (!needle) return '';
     const why = journalWhy(c && c.rpid);
-    return why && why.toLowerCase().includes(needle) ? why : '';
+    return why && looseFold(why).includes(needle) ? why : '';
   }
 
   function visibleComments() {
     let list = comments;
     if (filterKw) {
       const q = filterKw.toLowerCase();
-      list = list.filter((c) => (c.message || '').toLowerCase().includes(q) || idHit(c, q).length || reasonHit(c, q));
+      const msgQ = looseFold(q);
+      list = list.filter((c) => (msgQ && looseFold(c.message).includes(msgQ)) || idHit(c, q).length || reasonHit(c, q));
     }
     if (filtSrc !== 'all') list = list.filter((c) => c.src === filtSrc);
     if (filtType !== 'all') list = list.filter((c) => String(c.type) === filtType);
@@ -2180,23 +2208,19 @@
 
   function appendQuery(parent, text, q) {
     const src = String(text || '');
-    const needle = String(q || '').toLowerCase();
-    if (!needle) { parent.textContent = src; return; }
-    const lower = src.toLowerCase();
+    const chars = [...src];
+    const hits = looseHits(src, q, 80);
+    if (!hits.length) { parent.textContent = src; return; }
     let i = 0;
-    let guard = 0;
-    while (i < src.length && guard < 80) {
-      guard++;
-      const at = lower.indexOf(needle, i);
-      if (at < 0) break;
-      if (at > i) parent.appendChild(document.createTextNode(src.slice(i, at)));
+    for (const [a, b] of hits) {
+      if (a > i) parent.appendChild(document.createTextNode(chars.slice(i, a).join('')));
       const mark = document.createElement('span');
       mark.className = `${P}-hit`;
-      mark.textContent = src.slice(at, at + needle.length);
+      mark.textContent = chars.slice(a, b + 1).join('');
       parent.appendChild(mark);
-      i = at + needle.length;
+      i = b + 1;
     }
-    if (i < src.length) parent.appendChild(document.createTextNode(src.slice(i)));
+    if (i < chars.length) parent.appendChild(document.createTextNode(chars.slice(i).join('')));
   }
 
   function buildRow(c) {
@@ -2259,7 +2283,7 @@
     }
     if (filterKw) {
       const q = filterKw.toLowerCase();
-      const inMsg = (c.message || '').toLowerCase().includes(q);
+      const inMsg = !!(looseFold(q) && looseFold(c.message).includes(looseFold(q)));
       const hits = inMsg ? [] : idHit(c, q);
       if (hits.length) {
         const hit = document.createElement('span');
@@ -2451,7 +2475,7 @@
     filterKw = next;
     renderList();
     const short = filterKw && [...filterKw].length < 4;
-    say(filterKw ? `已按「${filterKw}」筛选。${short ? '少于 4 个字只搜正文，不拿去对编号。' : '正文、rpid、oid。'}` : '已清除关键词。');
+    say(filterKw ? `已按「${filterKw}」筛选。正文忽略空格和换行。${short ? '编号不满 4 位要完全相等。' : '也搜 rpid 和 oid。'}` : '已清除关键词。');
   }
 
   function armStop(on) {
