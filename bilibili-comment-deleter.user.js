@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.33
+// @version      2.2.34
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.33';
+  const VERSION = '2.2.34';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1731,7 +1731,7 @@
       markActive(c.rpid);
       setProg(i, targets.length, '①删除');
       const leftDel = (targets.length - i) * delay + (recheckOn ? targets.length * 600 : 0);
-      setStatus(`①删除 ${i + 1}/${targets.length} · ${String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22)} · 已用 ${fmtDur(Date.now() - t0)} · 剩余 ${fmtEta(leftDel)}`);
+      const snippet = String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22);
 
       let result = null;          // 'ok' | 'uncertain' | 'fail'
       let submittedPending = false;
@@ -1739,8 +1739,11 @@
       while (attempt < DELETE_MAX_RETRY) {
         if (aborted) break;
         let j = null;
-        try { j = await doDelete(c, csrf); }
-        catch (e) { result = 'fail'; log(`✗ 请求异常 rpid=${c.rpid} ${e.message}`, 'err'); break; }
+        try {
+          startBeat(() => `①删除 ${i + 1}/${targets.length} · ${snippet} · 请求中 · 已用 ${fmtDur(Date.now() - t0)} · 剩余 ${fmtEta(leftDel)}`);
+          j = await doDelete(c, csrf);
+        } catch (e) { result = 'fail'; log(`✗ 请求异常 rpid=${c.rpid} ${e.message}`, 'err'); break; }
+        finally { stopBeat(); }
         const codeStr = String(j.code);
         if (j.code === 0 || j.code === 12022 || j.code === -404) {
           if (!recheckOn) {
@@ -1802,9 +1805,13 @@
         const c = pending[i];
         markActive(c.rpid);
         setProg(i, pending.length, '②回查');
-        setStatus(`②回查 ${i + 1}/${pending.length} · ${String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22)} · 已确认 ${ok} · 已用 ${fmtDur(Date.now() - t0)} · 剩余 ${fmtEta((pending.length - i) * 600)}`);
+        const snippet = String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22);
         let v = null;
-        try { v = await recheckDefinitive(c); } catch (e) { v = null; }
+        try {
+          startBeat(() => `②回查 ${i + 1}/${pending.length} · ${snippet} · 请求中 · 已确认 ${ok} · 已用 ${fmtDur(Date.now() - t0)} · 剩余 ${fmtEta((pending.length - i) * 600)}`);
+          v = await recheckDefinitive(c);
+        } catch (e) { v = null; }
+        finally { stopBeat(); }
         if (v && v.state === 'auth') {
           aborted = true;
           setStatus(`已停止回查：${v.why}。已确认的保留，没查完的不算失败。`);
@@ -1816,7 +1823,11 @@
             log(`↻ 评论仍在，降速重试 ${s + 1}/${SHADOW_RETRY} rpid=${c.rpid}`, 'warn');
             await waitTick(SHADOW_WAIT, (left) => `↻ 影子重试 ${s + 1}/${SHADOW_RETRY} · ${left}s 后提交 · rpid=${c.rpid} · 已用 ${fmtDur(Date.now() - t0)}`);
             let dj = null;
-            try { dj = await doDelete(c, csrf); } catch (e) { break; }
+            try {
+              startBeat(() => `↻ 影子重试 ${s + 1}/${SHADOW_RETRY} · 提交中 · rpid=${c.rpid} · 已用 ${fmtDur(Date.now() - t0)}`);
+              dj = await doDelete(c, csrf);
+            } catch (e) { break; }
+            finally { stopBeat(); }
             if (dj && (dj.code === -101 || dj.code === -111)) {
               aborted = true;
               const why = ERR_TEXT[String(dj.code)] || `code=${dj.code}`;
@@ -1827,7 +1838,11 @@
             }
             await sleep(800);
             let again = null;
-            try { again = await oracleCheck(c); } catch (e) { again = null; }
+            try {
+              startBeat(() => `↻ 影子重试 ${s + 1}/${SHADOW_RETRY} · 回查中 · rpid=${c.rpid} · 已用 ${fmtDur(Date.now() - t0)}`);
+              again = await oracleCheck(c);
+            } catch (e) { again = null; }
+            finally { stopBeat(); }
             if (again && again.state === 'auth') {
               aborted = true;
               setStatus(`已停止回查：${again.why}。已确认的保留，没查完的不算失败。`);
