@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.73
+// @version      2.2.74
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.73';
+  const VERSION = '2.2.74';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -327,13 +327,11 @@
   let filledRows = 0;
   let filledMeta = 0;
   let rootClash = 0;
-  const rootClashIds = new Set();
   let placeClash = 0;
   function resetFillStats() {
     filledRows = 0;
     filledMeta = 0;
     rootClash = 0;
-    rootClashIds.clear();
     placeClash = 0;
   }
   function addIfAbsent(item) {
@@ -354,8 +352,8 @@
       let meta = false;
       const nextRoot = Number(item.root) || 0;
       if (!Number(cur.root) && nextRoot) { cur.root = nextRoot; meta = true; }
-      else if (Number(cur.root) && nextRoot && Number(cur.root) !== nextRoot && !rootClashIds.has(cur.rpid)) {
-        rootClashIds.add(cur.rpid);
+      else if (Number(cur.root) && nextRoot && Number(cur.root) !== nextRoot && !cur.rootConflict) {
+        cur.rootConflict = true;
         rootClash++;
       }
       const nextTime = Number(item.ctime) || 0;
@@ -1647,6 +1645,13 @@
       clash.title = '同一条评论后来的 oid 或类型不一样。删除仍用先看到的。';
       meta.appendChild(clash);
     }
+    if (c.rootConflict) {
+      const clash = document.createElement('span');
+      clash.className = `${P}-mark`;
+      clash.textContent = ' ·楼层有冲突';
+      clash.title = '后来的根楼层不一样。回查和删除仍用先看到的。';
+      meta.appendChild(clash);
+    }
     if (filterKw) {
       const q = filterKw.toLowerCase();
       const inMsg = (c.message || '').toLowerCase().includes(q);
@@ -2001,6 +2006,8 @@
     const per = delay + (recheckOn ? 600 : 0);
     const sample = String(targets[0].message || '(空评论)').replace(/\s+/g, ' ').slice(0, 36);
     const skipNote = skippedOk ? `\n已跳过 ${skippedOk} 条已确认删除。` : '';
+    const clashN = targets.filter((c) => c.placeClash || c.rootConflict).length;
+    const clashNote = clashN ? `\n其中 ${clashN} 条位置或楼层和后一次不一致，删除仍用先看到的。` : '';
     let outside = '';
     if (mode !== 'all' && mode !== 'explicit') {
       const visIds = new Set(visibleComments().map((c) => c.rpid));
@@ -2009,7 +2016,7 @@
       if (hiddenSel) outside = `\n另有 ${hiddenSel} 条已勾选但不在当前筛选里，这次不会删。`;
     }
     lockWhileDeleting(true);
-    if (!(await ask(`即将删除 ${targets.length} 条（${scope}）。\n间隔 ${delay}ms，回查${recheckOn ? '开' : '关（受理不算已删）'}，预计 ${fmtEta(targets.length * per)}。${skipNote}${outside}\n首条：${sample}\n\n不可撤销。`, '删除'))) return;
+    if (!(await ask(`即将删除 ${targets.length} 条（${scope}）。\n间隔 ${delay}ms，回查${recheckOn ? '开' : '关（受理不算已删）'}，预计 ${fmtEta(targets.length * per)}。${skipNote}${clashNote}${outside}\n首条：${sample}\n\n不可撤销。`, '删除'))) return;
 
     deleting = true; aborted = false;
     batchResults = new Map();
