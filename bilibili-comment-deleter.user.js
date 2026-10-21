@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.26
+// @version      2.2.27
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.26';
+  const VERSION = '2.2.27';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -498,13 +498,18 @@
     if (!replies) return { ok: false, msg: '未识别的结构：需要 replies 数组（aicu 导出 / 原始单页 JSON / 裸数组）' };
 
     let added = 0, dup = 0, invalid = 0;
+    const states = [];
     for (const it of replies) {
       const item = mapAicuReply(it);
       if (!item) { invalid++; continue; }
       item.src = 'import';
       if (addIfAbsent(item)) added++; else dup++;
+      const st = stateFromExport(it && it.state);
+      if (st) states.push({ rpid: item.rpid, state: st });
     }
-    return { ok: true, msg: `导入完成：新增 ${added}，重复 ${dup}，无效 ${invalid}` };
+    const restored = journalFillMissing(states);
+    const extra = restored ? `，补回处理记录 ${restored}` : '';
+    return { ok: true, msg: `导入完成：新增 ${added}，重复 ${dup}，无效 ${invalid}${extra}` };
   }
 
   /* ═══════════ 删除 + 回查 ═══════════ */
@@ -665,6 +670,43 @@
   function csvCell(s) {
     s = String(s == null ? '' : s);
     return '"' + s.replace(/"/g, '""') + '"';
+  }
+
+  function stateFromExport(v) {
+    const s = String(v == null ? '' : v).trim();
+    if (s === 'ok' || s === '已删除') return 'ok';
+    if (s === 'fail' || s === '未生效') return 'fail';
+    if (s === 'uncertain' || s === '待确认') return 'uncertain';
+    return '';
+  }
+
+  function journalFillMissing(pairs) {
+    if (!pairs || !pairs.length) return 0;
+    try {
+      const j = journalCompact(journalLoad());
+      const have = new Set(j.map((e) => e.rpid));
+      let n = 0;
+      for (const p of pairs) {
+        const id = Number(p.rpid);
+        if (!id || have.has(id) || !p.state) continue;
+        have.add(id);
+        j.unshift({ rpid: id, state: p.state, t: Date.now() });
+        n++;
+      }
+      if (!n) return 0;
+      if (j.length > JOURNAL_CAP && !journalTrimWarned) {
+        journalTrimWarned = true;
+        log(`处理记录超过 ${JOURNAL_CAP} 条，更早的已丢弃。那些评论再出现时不会被当成已删除。`, 'warn');
+      }
+      localStorage.setItem(JKEY, JSON.stringify(j.slice(0, JOURNAL_CAP)));
+      journalMapCache = null;
+      return n;
+    } catch (e) {
+      journalMapCache = null;
+      setStatus('浏览器拒绝保存处理记录，导入的结果列没有写回。');
+      log(`处理记录写入失败：${e.message}`, 'err');
+      return 0;
+    }
   }
 
   function stateLabel(rpid) {
