@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.125
+// @version      2.2.126
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.125';
+  const VERSION = '2.2.126';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1267,8 +1267,10 @@
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 3000);
     const scope = filtersOn() ? `当前筛选 ${list.length}/${comments.length}` : String(list.length);
-    setStatus(`已导出 ${scope} 条（${kind.toUpperCase()}，含处理结果、原因、截断和冲突标记）。${partial ? '文件名带 part，JSON 里写明这不是全部。' : ''}`);
-    log(`已导出 ${scope} 条（${kind.toUpperCase()}）`, 'ok');
+    const bits = partial ? filterBits() : [];
+    const filt = bits.length ? `筛选是${bits.join('、')}。` : '';
+    setStatus(`已导出 ${scope} 条（${kind.toUpperCase()}，含处理结果、原因、截断和冲突标记）。${filt}${partial ? '文件名带 part，JSON 里写明这不是全部。' : ''}`);
+    log(`已导出 ${scope} 条（${kind.toUpperCase()}）${bits.length ? `，${bits.join('、')}` : ''}`, 'ok');
   }
 
   /* ═══════════ 样式（明暗双主题，CSS 变量） ═══════════ */
@@ -2145,7 +2147,7 @@
     if (dall) {
       dall.disabled = !vis.length || deleting || fetching || confirming;
       dall.textContent = `${filtersOn() ? '💣 删除当前' : '💣 删除全部'} (${vis.length})`;
-      dall.title = filtersOn() ? '只删除当前筛选里能删的评论，不会动被筛掉的' : '删除列表里能删的全部评论';
+      dall.title = filtersOn() ? `只删除当前筛选里能删的评论（${filterBits().join('、')}），不会动被筛掉的` : '删除列表里能删的全部评论';
     }
     const copyBtn = document.getElementById(`${P}-copybad`);
     if (copyBtn) {
@@ -2357,6 +2359,10 @@
     } else {
       targets = visibleComments().filter((c) => c.oid && c.type && selected.has(c.rpid));
       scope = filtersOn() ? '当前筛选里选中的' : '选中的';
+    }
+    if (mode !== 'explicit' && filtersOn()) {
+      const bits = filterBits();
+      if (bits.length) scope = `${scope}：${bits.join('、')}`;
     }
     let skippedOk = 0;
     const skipBox = document.getElementById(`${P}-skipok`);
