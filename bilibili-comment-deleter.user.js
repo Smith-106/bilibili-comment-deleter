@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.19
+// @version      2.2.20
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.19';
+  const VERSION = '2.2.20';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1053,7 +1053,13 @@
         panel.style.transform = 'none';
       }
     } catch (e) { /* noop */ }
-    $el(`${P}-delay`).addEventListener('change', saveSettings);
+    readDelay();
+    $el(`${P}-delay`).addEventListener('change', readDelay);
+    window.addEventListener('beforeunload', (e) => {
+      if (!deleting && !fetching) return;
+      e.preventDefault();
+      e.returnValue = '';
+    });
     $el(`${P}-recheck`).addEventListener('change', saveSettings);
     $el(`${P}-skipok`).addEventListener('change', saveSettings);
     document.addEventListener('keydown', (e) => {
@@ -1424,7 +1430,7 @@
       if (!(await ask(`列表来自 UID=${datasetUid}，当前登录 UID=${curUid}。\n删除只会作用于当前登录账号自己的评论。\n继续这 ${targets.length} 条？`, '继续'))) return;
     }
     const recheckOn = document.getElementById(`${P}-recheck`).checked;
-    const delay = Math.max(200, parseInt(document.getElementById(`${P}-delay`).value, 10) || DELAY_DEFAULT);
+    const delay = readDelay();
     const per = delay + (recheckOn ? 600 : 0);
     const sample = String(targets[0].message || '(空评论)').replace(/\s+/g, ' ').slice(0, 36);
     const skipNote = skippedOk ? `\n已跳过 ${skippedOk} 条已确认删除。` : '';
@@ -1632,6 +1638,15 @@
       const st = jm.get(Number(c.rpid));
       return c.oid && c.type && (st === 'fail' || st === 'uncertain');
     });
+  }
+  function readDelay() {
+    const el = document.getElementById(`${P}-delay`);
+    const n = Math.max(200, Math.min(5000, parseInt(el && el.value, 10) || DELAY_DEFAULT));
+    if (el && el.value !== String(n)) {
+      el.value = String(n);
+      saveSettings();
+    }
+    return n;
   }
   function setStatus(t) { const el = document.getElementById(`${P}-status`); if (el) el.textContent = t; }
 
