@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.102
+// @version      2.2.103
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.102';
+  const VERSION = '2.2.103';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2180,7 +2180,7 @@
     }
     confirming = true;
     updCount();
-    let ok = 0, fail = 0, uncertain = 0, shadowFixed = 0, seen = 0, recheckLeft = 0;
+    let ok = 0, fail = 0, uncertain = 0, shadowFixed = 0, seen = 0, recheckLeft = 0, planned = 0;
     try {
     let targets, scope;
     if (mode === 'explicit' && explicitTargets) {
@@ -2234,6 +2234,7 @@
     if (!(await ask(`即将删除 ${targets.length} 条（${scope}）。\n间隔 ${delay}ms，回查${recheckOn ? '开' : '关（受理不算已删）'}，预计 ${fmtEta(targets.length * per)}。${skipNote}${clashNote}${outside}\n首条：${sample}\n\n不可撤销。`, '删除'))) return;
 
     deleting = true; aborted = false;
+    planned = targets.length;
     batchResults = new Map();
     recheckCache = new Map(); threadCache = new Map();   // 回查缓存仅批次内有效
     const retryBtn = document.getElementById(`${P}-retry`);
@@ -2442,7 +2443,9 @@
         stopBeat();
         lockWhileDeleting(false);
         armStop(false);
-        const crashText = `这次删除中途出错，已停下。已请求 ${seen} 条：确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}。已经发出的请求不会收回，请看日志和列表上的标记。`;
+        const unsentCrash = Math.max(0, planned - seen);
+        const crashBits = [unsentCrash ? `未请求 ${unsentCrash} 条` : '', recheckLeft ? `回查未完成 ${recheckLeft} 条` : ''].filter(Boolean).join('，');
+        const crashText = `这次删除中途出错，已停下。已请求 ${seen}${planned ? ` / ${planned}` : ''} 条：确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}。${crashBits ? `${crashBits}。` : ''}已经发出的请求不会收回，请看日志和列表上的标记。`;
         saveLastRun(crashText);
         setStatus(crashText);
         log('删除过程出错，已解开按钮。已发出的请求不会收回。', 'err');
