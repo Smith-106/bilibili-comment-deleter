@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.144
+// @version      2.2.145
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.144';
+  const VERSION = '2.2.145';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -880,7 +880,7 @@
       let added = 0;
       let pageNoAuthor = 0;
       const pageFirst = [];
-      const tops = (d.data && d.data.replies) || [];
+      const tops = areaTops(d.data);
       for (const top of tops) {
         const preview = Array.isArray(top.replies) ? top.replies : [];
         const pool = [{ r: top, root: 0 }].concat(
@@ -1060,6 +1060,25 @@
   const RECHECK_WALK_DELAY = 250;   // walk 翻页间隔
 
   /** 全量走完一个评论区：{map: Map(rpid→rootStr|''), complete, pages} */
+  function areaTops(data) {
+    const d = data || {};
+    const out = [];
+    const seen = new Set();
+    const push = (r) => {
+      if (!r || typeof r !== 'object' || Array.isArray(r)) return;
+      const id = rpidKey(r.rpid);
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      out.push(r);
+    };
+    for (const list of [d.replies, d.top_replies, d.hots]) {
+      if (Array.isArray(list)) for (const r of list) push(r);
+    }
+    if (d.top && !Array.isArray(d.top)) push(d.top);
+    const upper = d.upper && d.upper.top;
+    if (upper && !Array.isArray(upper)) push(upper);
+    return out;
+  }
   async function walkArea(oid, type) {
     const key = `${oid}:${type}`;
     if (recheckCache.has(key)) return recheckCache.get(key);
@@ -1085,7 +1104,7 @@
         break;
       }
       pages++;
-      for (const top of ((d.data && d.data.replies) || [])) {
+      for (const top of areaTops(d.data)) {
         map.set(String(top.rpid), '');
         if (Array.isArray(top.replies)) for (const s of top.replies) map.set(String(s.rpid), String(top.rpid));
       }
