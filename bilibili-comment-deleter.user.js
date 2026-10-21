@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.155
+// @version      2.2.156
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.155';
+  const VERSION = '2.2.156';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1304,6 +1304,9 @@
     } catch (e) { return null; }
   }
 
+  function jumpNeedsPriorTab(type) {
+    return type === 1 || type === 11;
+  }
   function jumpHint(c) {
     if (c.type === 1) return '新标签打开视频页。BV 查不到时用 av 号。';
     if (c.type === 17) return '新标签打开动态页。';
@@ -1335,7 +1338,7 @@
 
   async function jumpTo(c) {
     if (!c.oid) { setStatus('该评论缺少 oid，无法跳转。'); return; }
-    const tab = (c.type === 1 || c.type === 11) ? window.open('about:blank', '_blank') : null;
+    const tab = jumpNeedsPriorTab(c.type) ? window.open('about:blank', '_blank') : null;
     let url = null;
     let opened = '';
     if (c.type === 1) {
@@ -1365,7 +1368,7 @@
     }
     if (url) {
       if (tab) tab.location.href = url;
-      else if (!window.open(url, '_blank')) {
+      else if (jumpNeedsPriorTab(c.type) || !window.open(url, '_blank')) {
         setStatus(`浏览器拦截了新标签。请允许弹出窗口，或手动打开：${url}`);
         return;
       }
