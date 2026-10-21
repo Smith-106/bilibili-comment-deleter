@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.44
+// @version      2.2.45
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.44';
+  const VERSION = '2.2.45';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -880,7 +880,7 @@
         box-shadow:0 2px 14px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;
         user-select:none;transition:transform .2s}
       #${P}-toggle:hover{transform:scale(1.12)}
-      #${P}-toggle[data-busy="1"]{box-shadow:0 0 0 3px #ffb020, 0 2px 14px rgba(0,0,0,.35)}
+      #${P}-toggle[data-busy="1"]{box-shadow:0 0 0 3px #ffb020, 0 2px 14px rgba(0,0,0,.35);font-size:13px;font-weight:700}
       @media (prefers-reduced-motion: reduce){ #${P}-toggle{transition:none} }
 
       #${P}-panel{position:fixed;top:50%;right:24px;transform:translateY(-50%);width:480px;max-height:84vh;
@@ -2110,10 +2110,21 @@
     if (!savedTitle) savedTitle = document.title;
     if (label) {
       document.title = `${label} · ${savedTitle}`;
-      if (btn) { btn.dataset.busy = '1'; btn.title = `${label}。点此打开面板`; }
+      if (btn) {
+        const pct = String(label).match(/(\d+)%\s*\(\d+\/\d+\)/);
+        if (pct) btn.dataset.pct = pct[1] + '%';
+        btn.dataset.busy = '1';
+        btn.textContent = btn.dataset.pct || '…';
+        btn.title = `${label}。点此打开面板`;
+      }
     } else {
       if (savedTitle) document.title = savedTitle;
-      if (btn) { btn.dataset.busy = ''; btn.title = `B站评论批量删除 v${VERSION}`; }
+      if (btn) {
+        btn.dataset.busy = '';
+        delete btn.dataset.pct;
+        btn.textContent = '\u{1F5D1}\uFE0F';
+        btn.title = `B站评论批量删除 v${VERSION}`;
+      }
     }
   }
   function showProg(show) {
