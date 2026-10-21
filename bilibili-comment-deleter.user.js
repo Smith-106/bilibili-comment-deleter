@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.54
+// @version      2.2.55
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.54';
+  const VERSION = '2.2.55';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1070,7 +1070,7 @@
             <option value="default">默认</option><option value="tasc">时间↑</option><option value="tdesc">时间↓</option>
           </select></label>
           <button class="${P}-btn" id="${P}-selall" style="padding:4px 10px" title="勾选当前筛选。按住 Shift 再点两行，会连选中间">全选</button>
-          <button class="${P}-btn" id="${P}-selnone" style="padding:4px 10px">全不选</button>
+          <button class="${P}-btn" id="${P}-selnone" style="padding:4px 10px" title="去掉全部勾选，包括当前筛选外面的">全不选</button>
           <button class="${P}-btn" id="${P}-expj" title="导出当前筛选下列表为 JSON（删除前备份）">💾JSON</button>
           <button class="${P}-btn" id="${P}-expc" title="导出当前筛选下列表为 CSV">💾CSV</button>
           <button class="${P}-btn" id="${P}-reset" title="清空当前列表与勾选">🧹清空</button>
@@ -1160,10 +1160,19 @@
     });
     $el(`${P}-sortsel`).onchange = () => { sortMode = $el(`${P}-sortsel`).value; renderList(); updCount(); };
     $el(`${P}-selall`).onclick = () => {
-      visibleComments().forEach((c) => { if (c.oid && c.type) selected.add(c.rpid); });
+      const outside = outsideSelected();
+      let n = 0;
+      visibleComments().forEach((c) => { if (c.oid && c.type) { selected.add(c.rpid); n++; } });
       renderList(); updCount();
+      setStatus(outside ? `已勾选当前筛选 ${n} 条。筛选外还有 ${outside} 条，没有取消。` : `已勾选 ${n} 条。`);
     };
-    $el(`${P}-selnone`).onclick = () => { selected.clear(); renderList(); updCount(); };
+    $el(`${P}-selnone`).onclick = () => {
+      const outside = outsideSelected();
+      const n = selected.size;
+      selected.clear();
+      renderList(); updCount();
+      setStatus(!n ? '没有勾选。' : outside ? `已去掉全部勾选，包括筛选外的 ${outside} 条。` : `已去掉 ${n} 条勾选。`);
+    };
     $el(`${P}-expj`).onclick = () => doExport('json');
     $el(`${P}-expc`).onclick = () => doExport('csv');
     $el(`${P}-reset`).onclick = async () => {
@@ -1390,6 +1399,14 @@
     anchorRpid = b;
     renderList();
     setStatus(`已连选 ${n} 条（当前筛选内，含两端）。`);
+  }
+
+  function outsideSelected() {
+    if (!filtersOn()) return 0;
+    const visIds = new Set(visibleComments().map((c) => c.rpid));
+    let n = 0;
+    for (const id of selected) if (!visIds.has(id)) n++;
+    return n;
   }
 
   function filtersOn() {
