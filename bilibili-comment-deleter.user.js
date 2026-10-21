@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.122
+// @version      2.2.123
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.122';
+  const VERSION = '2.2.123';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2488,14 +2488,20 @@
           v = { state: 'uncertain', why: v.why };
         }
         if (v && v.state === 'fail' && !aborted) {
+          let lastClear = false;
+          let softWhy = '';
           for (let s = 0; s < SHADOW_RETRY; s++) {
+            lastClear = false;
             log(`↻ 评论仍在，降速重试 ${s + 1}/${SHADOW_RETRY} rpid=${c.rpid}`, 'warn');
             await waitTick(SHADOW_WAIT, (left) => `↻ 影子重试 ${s + 1}/${SHADOW_RETRY} · ${left}s 后提交 · rpid=${c.rpid} · 已用 ${fmtDur(Date.now() - t0)}`);
             let dj = null;
             try {
               startBeat(() => `↻ 影子重试 ${s + 1}/${SHADOW_RETRY} · 提交中 · rpid=${c.rpid} · 已用 ${fmtDur(Date.now() - t0)}`);
               dj = await doDelete(c, csrf);
-            } catch (e) { break; }
+            } catch (e) {
+              v = { state: 'uncertain', why: `影子重试提交失败：${e.message || '网络错误'}，不知道这次有没有删掉` };
+              break;
+            }
             finally { stopBeat(); }
             if (dj && (dj.code === -101 || dj.code === -111)) {
               aborted = true;
@@ -2511,8 +2517,12 @@
             try {
               startBeat(() => `↻ 影子重试 ${s + 1}/${SHADOW_RETRY} · 回查中 · rpid=${c.rpid} · 已用 ${fmtDur(Date.now() - t0)}`);
               again = await oracleCheck(c);
-            } catch (e) { again = null; }
+            } catch (e) {
+              softWhy = `影子重试后回查失败：${e.message || '网络错误'}`;
+              again = null;
+            }
             finally { stopBeat(); }
+            if (again && again.soft) softWhy = again.why || '影子重试后回查没有结果';
             if (again && again.state === 'auth') {
               aborted = true;
               if (!stopWhy) stopWhy = again.why;
@@ -2524,9 +2534,16 @@
             if (again && again.state === 'ok') {
               v = { state: 'ok', why: `影子失败后第${s + 1}次重试已确认删除` };
               shadowFixed++;
+              lastClear = true;
               break;
             }
-            if (again && again.state === 'fail') v = again;
+            if (again && again.state === 'fail') {
+              v = again;
+              lastClear = true;
+            }
+          }
+          if (v && v.state === 'fail' && !lastClear) {
+            v = { state: 'uncertain', why: softWhy || '影子重试后没能确认评论是否还在' };
           }
         }
         let state, msg;
