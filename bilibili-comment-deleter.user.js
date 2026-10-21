@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.126
+// @version      2.2.127
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.126';
+  const VERSION = '2.2.127';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -434,6 +434,11 @@
     const id = idExact(v);
     return id ? String(id) : '';
   }
+  function cursorId(v) {
+    if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+    if (typeof v === 'string' && /^\d+$/.test(v.trim())) return v.trim().replace(/^0+(?=\d)/, '');
+    return '';
+  }
   function addIfAbsent(item) {
     if (!item || !item.oid || !item.type) return false;
     item.rpid = idExact(item.rpid);
@@ -695,8 +700,10 @@
         if (h.aid && !seenAids.has(h.aid)) { seenAids.add(h.aid); aids.push(h.aid); }
       }
       const c = (data.data && data.data.cursor) || {};
-      if (typeof c.max !== 'number' || typeof c.view_at !== 'number') break;
-      cursorMax = c.max; viewAt = c.view_at;
+      const maxId = cursorId(c.max);
+      const view = cursorId(c.view_at);
+      if (!maxId || !view) break;
+      cursorMax = maxId; viewAt = view;
       await sleep(800);
     }
     if (!historyStop && !aborted && seenAids.size < HISTORY_VIDEO_CAP && guard >= 400) {
@@ -858,9 +865,10 @@
       if (aborted) { threadSkipped += later.length; return done(capped); }
       const c = (d.data && d.data.cursor) || {};
       if (c.is_end) break;
-      if (typeof c.next !== 'number' || c.next === nextPage) break;
+      const nxt = cursorId(c.next);
+      if (!nxt || nxt === String(nextPage)) break;
       if (guard >= scanPages) { capped = true; break; }
-      nextPage = c.next;
+      nextPage = nxt;
       await sleep(500);
     }
     const rest = await openNow(later);
@@ -1028,8 +1036,9 @@
         if (Array.isArray(top.replies)) for (const s of top.replies) map.set(String(s.rpid), String(top.rpid));
       }
       const c = (d.data && d.data.cursor) || {};
-      if (c.is_end || typeof c.next !== 'number' || c.next === next) { complete = true; break; }
-      next = c.next;
+      const nxt = cursorId(c.next);
+      if (c.is_end || !nxt || nxt === String(next)) { complete = true; break; }
+      next = nxt;
       await sleep(RECHECK_WALK_DELAY);
     }
     const res = { map, complete, pages, walkError };
