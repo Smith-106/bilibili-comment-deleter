@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.114
+// @version      2.2.115
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.114';
+  const VERSION = '2.2.115';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -224,6 +224,7 @@
 
   /* ═══════════ 处理日志（localStorage 持久化） ═══════════ */
   const JKEY = `${P}_journal`;
+  let journalWhyCache = null;
   let journalMapCache = null;
 
   function journalLoad() {
@@ -256,7 +257,8 @@
       const id = Number(e && e.rpid);
       if (!id || seen.has(id)) continue;
       seen.add(id);
-      out.push({ rpid: id, state: e.state, t: e.t || 0 });
+      const why = clipWhy(e.why);
+      out.push(why ? { rpid: id, state: e.state, t: e.t || 0, why } : { rpid: id, state: e.state, t: e.t || 0 });
     }
     return out;
   }
@@ -268,36 +270,53 @@
       const next = journalCompact(raw).slice(0, JOURNAL_CAP);
       if (next.length === raw.length) return;
       localStorage.setItem(JKEY, JSON.stringify(next));
-      journalMapCache = null;
+      journalMapCache = null; journalWhyCache = null;
       const dropped = raw.length - next.length;
       if (dropped > 0) journalCompactNote = ` 已合并 ${dropped} 条重复记录。`;
     } catch (e) { /* 打不开就不改 */ }
   }
 
-  function journalAdd(rpid, state) {
+  function clipWhy(s) {
+    const t = String(s || '').replace(/\s+/g, ' ').trim();
+    return t.length > 160 ? `${t.slice(0, 159)}…` : t;
+  }
+  function journalWhy(rpid) {
+    if (!journalWhyCache) {
+      journalWhyCache = new Map();
+      for (const e of journalLoad()) {
+        const id = Number(e.rpid);
+        if (!journalWhyCache.has(id) && e.why) journalWhyCache.set(id, clipWhy(e.why));
+      }
+    }
+    return journalWhyCache.get(Number(rpid)) || '';
+  }
+  function journalAdd(rpid, state, why) {
+    const note = clipWhy(why);
     try {
       const id = Number(rpid);
       const j = journalCompact(journalLoad()).filter((e) => e.rpid !== id);
-      j.unshift({ rpid: id, state, t: Date.now() });
+      const row = { rpid: id, state, t: Date.now() };
+      if (note) row.why = note;
+      j.unshift(row);
       if (j.length > JOURNAL_CAP && !journalTrimWarned) {
         journalTrimWarned = true;
         log(`处理记录超过 ${JOURNAL_CAP} 条，更早的已丢弃。那些评论再出现时不会被当成已删除。`, 'warn');
       }
       localStorage.setItem(JKEY, JSON.stringify(j.slice(0, JOURNAL_CAP)));
-      journalMapCache = null;
+      journalMapCache = null; journalWhyCache = null;
     } catch (e) {
-      journalMapCache = null;
+      journalMapCache = null; journalWhyCache = null;
       if (!journalTrimWarned) {
         journalTrimWarned = true;
         setStatus('浏览器拒绝保存处理记录，刷新后已确认状态可能丢失。');
         log(`处理记录写入失败：${e.message}`, 'err');
       }
     }
-    paintMark(rpid, state);
+    paintMark(rpid, state, note);
   }
 
   /** 已渲染行即时改徽标，不必等整批结束再重绘列表 */
-  function paintMark(rpid, state) {
+  function paintMark(rpid, state, why) {
     const row = document.querySelector(`#${P}-list .${P}-item[data-rpid="${rpid}"]`);
     if (!row) return;
     const meta = row.querySelector('.meta');
@@ -309,6 +328,9 @@
       meta.appendChild(b);
     }
     b.textContent = state === 'ok' ? ' ·已确认删除✓' : state === 'fail' ? ' ·未生效' : ' ·待确认';
+    const note = clipWhy(why);
+    if (note) b.title = note;
+    else b.removeAttribute('title');
   }
 
   /** 标出正在处理的行，并只在列表内部滚动，不带动整页 */
@@ -1102,10 +1124,10 @@
         log(`处理记录超过 ${JOURNAL_CAP} 条，更早的已丢弃。那些评论再出现时不会被当成已删除。`, 'warn');
       }
       localStorage.setItem(JKEY, JSON.stringify(j.slice(0, JOURNAL_CAP)));
-      journalMapCache = null;
+      journalMapCache = null; journalWhyCache = null;
       return n;
     } catch (e) {
-      journalMapCache = null;
+      journalMapCache = null; journalWhyCache = null;
       setStatus('浏览器拒绝保存处理记录，导入的结果列没有写回。');
       log(`处理记录写入失败：${e.message}`, 'err');
       return 0;
@@ -1481,7 +1503,7 @@
       if (!st.n) { setStatus('没有本地处理记录。'); return; }
       if (!(await ask(`清除 ${st.n} 条本地处理记录？\n已确认 ${st.ok}，未成功 ${st.bad}。\n列表还在，但这些评论不再被当成已删除。`, '清除'))) return;
       try { localStorage.removeItem(JKEY); } catch (e) { /* noop */ }
-      journalMapCache = null;
+      journalMapCache = null; journalWhyCache = null;
       renderList();
       updCount();
       setStatus('处理记录已清除。');
@@ -1895,6 +1917,8 @@
       const b = document.createElement('span');
       b.className = `${P}-mark`;
       b.textContent = st === 'ok' ? ' ·上次已删除✓' : st === 'fail' ? ' ·上次失败' : ' ·上次待确认';
+      const why = journalWhy(c.rpid);
+      if (why) b.title = why;
       meta.appendChild(b);
     }
     if (!c.oid || !c.type) {
@@ -2284,6 +2308,7 @@
       const snippet = String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22);
 
       let result = null;          // 'ok' | 'uncertain' | 'fail'
+      let whyNote = '';
       let submittedPending = false;
       let attempt = 0;
       while (attempt < DELETE_MAX_RETRY) {
@@ -2292,12 +2317,13 @@
         try {
           startBeat(() => `①删除 ${i + 1}/${targets.length} · ${snippet} · 请求中 · 已用 ${fmtDur(Date.now() - t0)} · 剩余 ${fmtEta(leftDel)}`);
           j = await doDelete(c, csrf);
-        } catch (e) { result = 'fail'; log(`✗ 请求异常 rpid=${c.rpid} ${e.message}`, 'err'); break; }
+        } catch (e) { result = 'fail'; whyNote = `请求异常：${e.message || '网络错误'}`; log(`✗ 请求异常 rpid=${c.rpid} ${e.message}`, 'err'); break; }
         finally { stopBeat(); }
         const codeStr = String(j.code);
         if (j.code === 0 || j.code === 12022 || j.code === -404) {
           if (!recheckOn) {
             result = j.code === 0 ? 'uncertain' : 'ok';
+            whyNote = j.code === 0 ? '已提交但未回查，不算已删' : `评论已不存在（${j.code}）`;
             log(j.code === 0 ? `✓ 已提交（未回查，不算已删） rpid=${c.rpid}` : `• ${j.code}：评论已不存在 rpid=${c.rpid}`, j.code === 0 ? 'warn' : 'info');
           } else {
             submittedPending = true;
@@ -2309,6 +2335,7 @@
           result = 'uncertain';
           aborted = true;
           const why = ERR_TEXT[codeStr] || `code=${j.code}`;
+          whyNote = why;
           if (!stopWhy) stopWhy = why;
           setStatus(`已停止：${why}。这条算待确认，后面的还没请求。请重新登录或刷新后再试。`);
           log(`✗ rpid=${c.rpid} ${why}，停止后续删除`, 'err');
@@ -2319,6 +2346,7 @@
           const why = j.code === -509 ? '限流 -509' : (j.message || `code=${j.code}`);
           if (attempt + 1 >= DELETE_MAX_RETRY) {
             result = 'fail';
+            whyNote = `${why}，重试后仍失败`;
             setStatus(`${why}，已达重试上限 · rpid=${c.rpid}`);
             log(`✗ rpid=${c.rpid} ${why}，重试后仍失败`, 'err');
             break;
@@ -2329,17 +2357,19 @@
           continue;
         }
         result = 'fail';
+        whyNote = `code=${j.code} ${j.message || ERR_TEXT[codeStr] || ''}`.trim();
         log(`✗ rpid=${c.rpid} code=${j.code} ${j.message || ERR_TEXT[codeStr] || ''}`, 'err');
         break;
       }
       if (!result && !submittedPending) {   // 限流耗尽 / 中途停止 → 显式记录（不是静默漏计）
         result = aborted ? 'uncertain' : 'fail';
+        whyNote = aborted ? '停在这条，请求可能没发出，按待确认' : '限流后放弃';
         log(aborted ? `⏹ 停止于 rpid=${c.rpid}（按待确认处理，可重试）`
                     : `✗ rpid=${c.rpid} 连续 ${DELETE_MAX_RETRY - 1} 次限流后放弃（可用「重试未成功」）`, 'err');
       }
       if (result) {
         batchResults.set(c.rpid, result);
-        journalAdd(c.rpid, result);
+        journalAdd(c.rpid, result, whyNote);
         if (result === 'ok') ok++; else if (result === 'uncertain') uncertain++; else fail++;
       } else {
         pending.push(c);
@@ -2357,7 +2387,7 @@
           for (let k = i; k < pending.length; k++) {
             const left = pending[k];
             batchResults.set(left.rpid, 'uncertain');
-            journalAdd(left.rpid, 'uncertain');
+            journalAdd(left.rpid, 'uncertain', '回查停了，已经请求但没确认');
             uncertain++;
           }
           log(`回查停了，剩下 ${recheckLeft} 条已经请求但没确认，记为待确认。`, 'warn');
@@ -2428,7 +2458,7 @@
         else if (v.state === 'fail') { state = 'fail'; msg = `未生效（${v.why}）`; }
         else { state = 'uncertain'; msg = v.why; }
         batchResults.set(c.rpid, state);
-        journalAdd(c.rpid, state);
+        journalAdd(c.rpid, state, msg);
         if (state === 'ok') ok++; else if (state === 'uncertain') uncertain++; else fail++;
         log(`${state === 'ok' ? '✓' : state === 'fail' ? '✗' : '～'} rpid=${c.rpid} ${msg}`,
             state === 'ok' ? 'ok' : state === 'fail' ? 'err' : 'warn');
@@ -2498,7 +2528,7 @@
         try {
           for (const c of pending) {
             if (batchResults && batchResults.has(c.rpid)) continue;
-            journalAdd(c.rpid, 'uncertain');
+            journalAdd(c.rpid, 'uncertain', '删除中途出错，已经请求但没确认');
             if (batchResults) batchResults.set(c.rpid, 'uncertain');
             uncertain++;
             parked++;
