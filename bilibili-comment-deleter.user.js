@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.135
+// @version      2.2.136
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.135';
+  const VERSION = '2.2.136';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1108,7 +1108,7 @@
       const rs = (d.data && d.data.replies) || [];
       for (const r of rs) set.add(String(r.rpid));
       const count = d.data && d.data.page && d.data.page.count;
-      if ((typeof count === 'number' && pn * RECHECK_SUB_PS >= count) || rs.length < RECHECK_SUB_PS) { complete = true; break; }
+      if (threadPageDone(count, pn, RECHECK_SUB_PS, rs.length)) { complete = true; break; }
       await sleep(RECHECK_WALK_DELAY);
     }
     const res = { set, complete, walkError };
@@ -1116,6 +1116,10 @@
     return res;
   }
 
+  function threadPageDone(count, pn, pageSize, got) {
+    const countKnown = typeof count === 'number' && count > 0;
+    return (countKnown && pn * pageSize >= count) || got < pageSize;
+  }
   /** 官方单条 oracle。顶评 root 用自身 rpid。不可判定返回 null，交给 walk。 */
   async function oracleCheck(c) {
     const root = c.root || c.rpid;
