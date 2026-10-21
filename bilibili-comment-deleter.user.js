@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.133
+// @version      2.2.134
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.133';
+  const VERSION = '2.2.134';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -439,6 +439,20 @@
     if (typeof v === 'string' && /^\d+$/.test(v.trim())) return v.trim().replace(/^0+(?=\d)/, '');
     return '';
   }
+  function nextReplyCursor(cursor, prev) {
+    const c = cursor || {};
+    const page = c.pagination_reply || {};
+    const offset = typeof page.next_offset === 'string' ? page.next_offset.trim() : '';
+    if (offset && offset !== (prev.offset || '')) return { offset, next: prev.next };
+    const nxt = cursorId(c.next);
+    if (nxt && nxt !== '0' && nxt !== String(prev.next)) return { offset: '', next: nxt };
+    return null;
+  }
+  function replyMainUrl(type, oid, next, offset) {
+    const base = `https://api.bilibili.com/x/v2/reply/main?type=${type}&oid=${oid}&mode=2`;
+    if (offset) return `${base}&pagination_str=${encodeURIComponent(JSON.stringify({ offset }))}`;
+    return `${base}&next=${encodeURIComponent(next)}`;
+  }
   function addIfAbsent(item) {
     if (!item || !item.oid || !item.type) return false;
     item.rpid = idExact(item.rpid);
@@ -670,6 +684,7 @@
     let historyStop = '';
     let videoFail = 0;
     let cappedVideos = 0;
+    let cursorStuckVideos = 0;
     let threadSkipped = 0;
     let threadMore = 0;
     let threadFail = 0;
@@ -735,8 +750,10 @@
       try {
         const scan = await fetchOwnRepliesFromVideo(aid, mid, scanPages, pace);
         if (scan && scan.capped) cappedVideos++;
+        if (scan && scan.cursorStuck) cursorStuckVideos++;
         const bits = [];
         if (scan && scan.capped) bits.push('后面还有评论，这次没翻');
+        if (scan && scan.cursorStuck) bits.push('翻页游标停了，后面可能还有');
         const one = scan && threadGapText(scan.threadSkipped, scan.threadMore, scan.threadFail);
         if (one) bits.push(one);
         if (bits.length) {
@@ -761,7 +778,7 @@
       startBeat(() => `${videoNote || `视频 ${doneAt}/${aids.length} 完成`}${running ? ` · 累计 ${running}` : ''} · ${Math.max(0, Math.ceil((waitUntil - Date.now()) / 1000))}s 后下一个 · 这次 +${fresh()} · 列表 ${comments.length} 条 · 已用 ${spent()}${videoFail ? ` · 失败 ${videoFail}` : ''}`);
       await sleep(HISTORY_VIDEO_DELAY);
     }
-    return { historyStop, videoFail, cappedVideos, threadSkipped, threadMore, threadFail, videosDone, videosPlanned: aids.length, historyOther };
+    return { historyStop, videoFail, cappedVideos, cursorStuckVideos, threadSkipped, threadMore, threadFail, videosDone, videosPlanned: aids.length, historyOther };
     } finally { stopBeat(); }
   }
 
@@ -799,17 +816,19 @@
 
   async function fetchOwnRepliesFromVideo(aid, mid, scanPages, pace) {
     let nextPage = 0;
+    let pageOffset = '';
     let guard = 0;
     let threadSkipped = 0;
     let threadMore = 0;
     let threadFail = 0;
     let openedThreads = 0;
     let capped = false;
+    let cursorStuck = false;
     const queued = new Set();
     const later = [];
     const done = (cappedNow) => {
       if (pace) pace.thread = '';
-      return { capped: cappedNow, threadSkipped, threadMore, threadFail };
+      return { capped: cappedNow, cursorStuck, threadSkipped, threadMore, threadFail };
     };
     async function openNow(list) {
       let n = 0;
@@ -837,7 +856,7 @@
     while (guard < scanPages) {
       guard++;
       if (aborted) { threadSkipped += later.length; return done(false); }
-      const d = await gmGetJSON(`https://api.bilibili.com/x/v2/reply/main?type=1&oid=${aid}&mode=2&next=${nextPage}`);
+      const d = await gmGetJSON(replyMainUrl(1, aid, nextPage, pageOffset));
       if (d.code !== 0) throw new Error(`av${aid} 评论接口 code=${d.code}`);
       let added = 0;
       const pageFirst = [];
@@ -878,10 +897,11 @@
       if (aborted) { threadSkipped += later.length; return done(capped); }
       const c = (d.data && d.data.cursor) || {};
       if (c.is_end) break;
-      const nxt = cursorId(c.next);
-      if (!nxt || nxt === String(nextPage)) break;
+      const step = nextReplyCursor(c, { next: nextPage, offset: pageOffset });
+      if (!step) { cursorStuck = true; break; }
       if (guard >= scanPages) { capped = true; break; }
-      nextPage = nxt;
+      nextPage = step.next;
+      pageOffset = step.offset;
       await sleep(500);
     }
     const rest = await openNow(later);
@@ -1023,11 +1043,11 @@
     const key = `${oid}:${type}`;
     if (recheckCache.has(key)) return recheckCache.get(key);
     const map = new Map();
-    let complete = false, pages = 0, next = 0, walkError = '';
+    let complete = false, pages = 0, next = 0, offset = '', walkError = '';
     for (let guard = 0; guard < RECHECK_TOP_MAX && !aborted; guard++) {
       let d;
       try {
-        d = await gmGetJSON(`https://api.bilibili.com/x/v2/reply/main?type=${type}&oid=${oid}&mode=2&next=${next}`, { retries: 1 });
+        d = await gmGetJSON(replyMainUrl(type, oid, next, offset), { retries: 1 });
       } catch (e) {
         walkError = e.message || '网络错误';
         log(`回查 walk 失败 oid=${oid}: ${walkError}`, 'warn');
@@ -1049,9 +1069,15 @@
         if (Array.isArray(top.replies)) for (const s of top.replies) map.set(String(s.rpid), String(top.rpid));
       }
       const c = (d.data && d.data.cursor) || {};
-      const nxt = cursorId(c.next);
-      if (c.is_end || !nxt || nxt === String(next)) { complete = true; break; }
-      next = nxt;
+      if (c.is_end) { complete = true; break; }
+      const step = nextReplyCursor(c, { next, offset });
+      if (!step) {
+        walkError = '翻页游标没有下一页';
+        log(`回查 walk 游标停了 oid=${oid} type=${type}，这一区不算翻完`, 'warn');
+        break;
+      }
+      next = step.next;
+      offset = step.offset;
       await sleep(RECHECK_WALK_DELAY);
     }
     const res = { map, complete, pages, walkError };
@@ -2305,18 +2331,19 @@
       const added = comments.length - had;
       const videoNote = hist.videoFail ? `${hist.videoFail} 个视频没扫成。` : '';
       const moreNote = hist.cappedVideos ? `${hist.cappedVideos} 个视频后面还有评论，这次没翻。` : '';
+      const cursorNote = hist.cursorStuckVideos ? `${hist.cursorStuckVideos} 个视频的翻页游标停了，后面可能还有。` : '';
       const threadNote = threadGapText(hist.threadSkipped, hist.threadMore, hist.threadFail);
-      const histHead = aborted ? '已停止扫描' : hist.historyStop ? '官方扫描未翻完' : (videoNote || moreNote || threadNote) ? '官方扫描有遗漏' : '✅ 官方扫描完成';
+      const histHead = aborted ? '已停止扫描' : hist.historyStop ? '官方扫描未翻完' : (videoNote || moreNote || cursorNote || threadNote) ? '官方扫描有遗漏' : '✅ 官方扫描完成';
       const threadTail = threadNote ? `${threadNote}。每视频最多补 ${HISTORY_THREAD_OPEN_MAX} 条楼的第一页。` : '';
       const fillNote = `${filledRows ? `补全了 ${filledRows} 条原来更短的正文。` : ''}${filledMeta ? `补上了 ${filledMeta} 条缺失的楼层或时间。` : ''}${rootClash ? `有 ${rootClash} 条的楼层和后一次不一致，仍用先看到的。` : ''}${placeClash ? `有 ${placeClash} 条的 oid 或类型和后一次不一致，删除仍用先看到的。` : ''}${filledSrc ? `补上了 ${filledSrc} 条原来没有的来源。` : ''}${srcClash ? `有 ${srcClash} 条的来源和后一次不一致，仍用先看到的。` : ''}`;
       const otherNote = hist.historyOther ? `另外 ${hist.historyOther} 条历史不是视频，没扫。` : '';
       const stopScan = aborted
         ? (hist.videosPlanned ? `视频扫到 ${hist.videosDone || 0}/${hist.videosPlanned} 个就停了。` : '还没收集到视频就停了。')
         : '';
-      const histSum = `${histHead}：这次 +${added}，列表共 ${comments.length} 条。每视频最近 ${scanPages} 页，最多 ${HISTORY_VIDEO_CAP} 个视频。用时 ${fmtDur(Date.now() - t0)}。${fillNote}${hist.historyStop || ''}${videoNote}${moreNote}${threadTail}${otherNote}${stopScan}${digestLine()}`;
+      const histSum = `${histHead}：这次 +${added}，列表共 ${comments.length} 条。每视频最近 ${scanPages} 页，最多 ${HISTORY_VIDEO_CAP} 个视频。用时 ${fmtDur(Date.now() - t0)}。${fillNote}${hist.historyStop || ''}${videoNote}${moreNote}${cursorNote}${threadTail}${otherNote}${stopScan}${digestLine()}`;
       saveLastRun(histSum);
       setStatus(histSum);
-      const histWhy = `${hist.historyStop || ''}${videoNote}${moreNote}${threadNote ? `${threadNote}。` : ''}${stopScan}`;
+      const histWhy = `${hist.historyStop || ''}${videoNote}${moreNote}${cursorNote}${threadNote ? `${threadNote}。` : ''}${stopScan}`;
       log(`${histHead}，这次 +${added}，列表共 ${comments.length} 条${histWhy ? `。${histWhy}` : ''}${fillNote ? ` ${fillNote}` : ''}`, aborted || histWhy ? 'warn' : 'ok');
     } catch (e) {
       stopBeat();
