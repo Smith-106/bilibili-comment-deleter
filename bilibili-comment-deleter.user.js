@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.5
+// @version      2.2.6
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.5';
+  const VERSION = '2.2.6';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -75,6 +75,14 @@
     const m = raw.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]*)'));
     if (!m) return '';
     try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; }
+  }
+
+  function fmtEta(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return `约 ${s} 秒`;
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return r ? `约 ${m} 分 ${r} 秒` : `约 ${m} 分`;
   }
 
   function fmtTime(t) {
@@ -548,6 +556,8 @@
       url = `https://t.bilibili.com/${c.oid}#reply${c.rpid}`;
     } else if (c.type === 12) {
       url = `https://www.bilibili.com/read/cv${c.oid}#reply${c.rpid}`;
+    } else if (c.type === 11) {
+      url = `https://www.bilibili.com/bangumi/play/ep${c.oid}#reply${c.rpid}`;
     }
     if (url) window.open(url, '_blank');
     else alert(`暂不支持 ${typeText(c.type)} 的跳转（oid=${c.oid}）`);
@@ -559,17 +569,23 @@
     return '"' + s.replace(/"/g, '""') + '"';
   }
 
+  function stateLabel(rpid) {
+    const st = journalMap().get(Number(rpid));
+    return st === 'ok' ? '已删除' : st === 'fail' ? '未生效' : st === 'uncertain' ? '待确认' : '';
+  }
+
   function doExport(kind) {
     const list = visibleComments();
     if (!list.length) { setStatus('当前筛选下没有数据可导出。'); return; }
+    const stamped = list.map((c) => Object.assign({}, c, { state: stateLabel(c.rpid) }));
     let blob, name;
     if (kind === 'json') {
-      blob = new Blob([JSON.stringify(list, null, 2)], { type: 'application/json' });
+      blob = new Blob([JSON.stringify(stamped, null, 2)], { type: 'application/json' });
       name = `bili-comments-${Date.now()}.json`;
     } else {
-      const head = 'rpid,oid,type,typeText,message,ctime,ctimeText,root,src';
-      const rows = list.map((c) =>
-        [c.rpid, c.oid, c.type, typeText(c.type), c.message, c.ctime, fmtTime(c.ctime), c.root, SRC_TEXT[c.src] || c.src].map(csvCell).join(',')
+      const head = 'rpid,oid,type,typeText,message,ctime,ctimeText,root,src,state';
+      const rows = stamped.map((c) =>
+        [c.rpid, c.oid, c.type, typeText(c.type), c.message, c.ctime, fmtTime(c.ctime), c.root, SRC_TEXT[c.src] || c.src, c.state].map(csvCell).join(',')
       ).join('\r\n');
       blob = new Blob(['\ufeff' + head + '\r\n' + rows], { type: 'text/csv;charset=utf-8' });
       name = `bili-comments-${Date.now()}.csv`;
@@ -579,6 +595,7 @@
     a.href = url; a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 3000);
+    setStatus(`已导出 ${list.length} 条（${kind.toUpperCase()}，含处理结果列）。`);
     log(`已导出 ${list.length} 条（${kind.toUpperCase()}）`, 'ok');
   }
 
@@ -1179,15 +1196,17 @@
     if (datasetUid && curUid && datasetUid !== curUid) {
       if (!confirm(`⚠️ 列表来自 UID=${datasetUid}，当前登录 UID=${curUid}。\n删除接口只会作用于当前登录账号名下的评论（他人评论不会被删）。\n继续执行 ${targets.length} 条删除？`)) return;
     }
-    if (!confirm(`即将删除 ${targets.length} 条评论（${scope}）。\n\n⚠️ 此操作不可逆！确认删除？`)) return;
+    const recheckOn = document.getElementById(`${P}-recheck`).checked;
+    const delay = Math.max(200, parseInt(document.getElementById(`${P}-delay`).value, 10) || DELAY_DEFAULT);
+    const per = delay + (recheckOn ? 600 : 0);
+    const sample = String(targets[0].message || '(空评论)').replace(/\s+/g, ' ').slice(0, 36);
+    if (!confirm(`即将删除 ${targets.length} 条（${scope}）。\n间隔 ${delay}ms，回查${recheckOn ? '开' : '关'}，预计 ${fmtEta(targets.length * per)}。\n首条：${sample}\n\n不可撤销。确认删除？`)) return;
 
     deleting = true; aborted = false;
     batchResults = new Map();
     recheckCache = new Map(); threadCache = new Map();   // 回查缓存仅批次内有效
     const retryBtn = document.getElementById(`${P}-retry`);
     if (retryBtn) { retryBtn.style.display = 'none'; }
-    const recheckOn = document.getElementById(`${P}-recheck`).checked;
-    const delay = Math.max(200, parseInt(document.getElementById(`${P}-delay`).value, 10) || DELAY_DEFAULT);
 
     lockWhileDeleting(true);
     armStop(true);
@@ -1202,7 +1221,8 @@
       const c = targets[i];
       markActive(c.rpid);
       setProg(i, targets.length, '①删除');
-      setStatus(`①删除 ${i + 1}/${targets.length} · 已受理 ${pending.length} · 直接失败 ${fail}`);
+      const leftDel = (targets.length - i) * delay + (recheckOn ? targets.length * 600 : 0);
+      setStatus(`①删除 ${i + 1}/${targets.length} · 已受理 ${pending.length} · 直接失败 ${fail} · 剩余 ${fmtEta(leftDel)}`);
 
       let result = null;          // 'ok' | 'uncertain' | 'fail'
       let submittedPending = false;
@@ -1258,7 +1278,7 @@
         const c = pending[i];
         markActive(c.rpid);
         setProg(i, pending.length, '②回查');
-        setStatus(`②回查 ${i + 1}/${pending.length} · 已确认 ${ok} · 未生效 ${fail} · 待确认 ${uncertain}`);
+        setStatus(`②回查 ${i + 1}/${pending.length} · 已确认 ${ok} · 未生效 ${fail} · 待确认 ${uncertain} · 剩余 ${fmtEta((pending.length - i) * 600)}`);
         let v = null;
         try { v = await recheckDefinitive(c); } catch (e) { v = null; }
         if (v && v.state === 'fail' && !aborted) {
