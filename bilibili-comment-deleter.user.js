@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.97
+// @version      2.2.98
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.97';
+  const VERSION = '2.2.98';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2453,20 +2453,39 @@
     const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
     el.appendChild(d);
     let trimmed = false;
-    while (el.children.length > 300) { el.removeChild(el.firstChild); trimmed = true; }
+    while (el.children.length > 300) {
+      if (!dropLogLine(el)) break;
+      trimmed = true;
+    }
     if (trimmed) {
       let note = el.querySelector(`.${P}-log-trim`);
       if (!note) {
         note = document.createElement('div');
         note.className = `${P}-log-line ${P}-warn ${P}-log-trim`;
-        note.textContent = '更早的日志已省略，只保留最近约 300 行。';
+        note.textContent = '更早的普通日志已优先省略。警告和操作说明会多留一会儿，仍超过约 300 行时才丢掉最旧的。';
       }
       el.insertBefore(note, el.firstChild);
-      while (el.children.length > 301) el.removeChild(el.children[1]);
+      while (el.children.length > 301) {
+        if (!dropLogLine(el)) break;
+      }
     }
     if (stick) el.scrollTop = el.scrollHeight;
   }
 
+  function dropLogLine(el) {
+    let plain = null;
+    let important = null;
+    for (const node of el.children) {
+      if (node.classList.contains(`${P}-log-trim`)) continue;
+      const keep = node.classList.contains(`${P}-err`) || node.classList.contains(`${P}-warn`) || node.classList.contains(`${P}-keep`);
+      if (!keep) { plain = node; break; }
+      if (!important) important = node;
+    }
+    const drop = plain || important;
+    if (!drop) return false;
+    el.removeChild(drop);
+    return true;
+  }
   function badInList() {
     const jm = journalMap();
     return comments.filter((c) => {
