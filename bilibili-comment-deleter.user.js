@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.115
+// @version      2.2.116
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.115';
+  const VERSION = '2.2.116';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -833,7 +833,7 @@
         if (keepReal) keptSrc++;
       } else dup++;
       const st = stateFromExport(it && it.state);
-      if (st) states.push({ rpid: item.rpid, state: st });
+      if (st) states.push({ rpid: item.rpid, state: st, why: it && it.why });
     }
     const restored = journalFillMissing(states);
     const extra = restored ? `，补回处理记录 ${restored}` : '';
@@ -894,6 +894,7 @@
       placeClash: col(cols, 'placeClash'),
       rootConflict: col(cols, 'rootConflict'),
       srcConflict: col(cols, 'srcConflict'),
+      why: col(cols, 'why'),
     }));
     return importJson(JSON.stringify(replies));
   }
@@ -1115,7 +1116,10 @@
         const id = Number(p.rpid);
         if (!id || have.has(id) || !p.state) continue;
         have.add(id);
-        j.unshift({ rpid: id, state: p.state, t: Date.now() });
+        const row = { rpid: id, state: p.state, t: Date.now() };
+        const note = clipWhy(p.why);
+        if (note) row.why = note;
+        j.unshift(row);
         n++;
       }
       if (!n) return 0;
@@ -1142,7 +1146,7 @@
   function doExport(kind) {
     const list = visibleComments();
     if (!list.length) { setStatus('当前筛选下没有数据可导出。'); return; }
-    const stamped = list.map((c) => Object.assign({}, c, { state: stateLabel(c.rpid) }));
+    const stamped = list.map((c) => Object.assign({}, c, { state: stateLabel(c.rpid), why: journalWhy(c.rpid) }));
     const partial = filtersOn();
     const tag = partial ? '-part' : '';
     let blob, name;
@@ -1153,9 +1157,9 @@
       blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
       name = `bili-comments${tag}-${Date.now()}.json`;
     } else {
-      const head = 'rpid,oid,type,typeText,message,ctime,ctimeText,root,src,state,cut,placeClash,rootConflict,srcConflict';
+      const head = 'rpid,oid,type,typeText,message,ctime,ctimeText,root,src,state,cut,placeClash,rootConflict,srcConflict,why';
       const rows = stamped.map((c) =>
-        [c.rpid, c.oid, c.type, typeText(c.type), c.message, c.ctime, fmtTime(c.ctime), c.root, SRC_TEXT[c.src] || c.src, c.state, c.cut ? 1 : 0, c.placeClash ? 1 : 0, c.rootConflict ? 1 : 0, c.srcConflict ? 1 : 0].map(csvCell).join(',')
+        [c.rpid, c.oid, c.type, typeText(c.type), c.message, c.ctime, fmtTime(c.ctime), c.root, SRC_TEXT[c.src] || c.src, c.state, c.cut ? 1 : 0, c.placeClash ? 1 : 0, c.rootConflict ? 1 : 0, c.srcConflict ? 1 : 0, c.why || ''].map(csvCell).join(',')
       ).join('\r\n');
       blob = new Blob(['\ufeff' + head + '\r\n' + rows], { type: 'text/csv;charset=utf-8' });
       name = `bili-comments${tag}-${Date.now()}.csv`;
@@ -1166,7 +1170,7 @@
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 3000);
     const scope = filtersOn() ? `当前筛选 ${list.length}/${comments.length}` : String(list.length);
-    setStatus(`已导出 ${scope} 条（${kind.toUpperCase()}，含处理结果、截断和冲突标记）。${partial ? '文件名带 part，JSON 里写明这不是全部。' : ''}`);
+    setStatus(`已导出 ${scope} 条（${kind.toUpperCase()}，含处理结果、原因、截断和冲突标记）。${partial ? '文件名带 part，JSON 里写明这不是全部。' : ''}`);
     log(`已导出 ${scope} 条（${kind.toUpperCase()}）`, 'ok');
   }
 
@@ -1524,12 +1528,12 @@
       const ids = comments.filter((c) => {
         const st = jm.get(Number(c.rpid));
         return st === 'fail' || st === 'uncertain';
-      }).map((c) => c.rpid);
+      }).map((c) => `${c.rpid}\t${journalWhy(c.rpid)}`);
       if (!ids.length) { setStatus('没有未成功的 rpid 可复制。'); return; }
       const text = ids.join('\n');
       try {
         await navigator.clipboard.writeText(text);
-        setStatus(`已复制 ${ids.length} 个未成功 rpid。`);
+        setStatus(`已复制 ${ids.length} 个未成功 rpid（每行后面是原因，没有原因就空着）。`);
       } catch (e) {
         setStatus('复制失败。请允许剪贴板，或从日志里复制。');
         log(`未成功 rpid：${ids.join(',')}`, 'warn');
