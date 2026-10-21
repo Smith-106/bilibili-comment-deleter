@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.42
+// @version      2.2.43
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.42';
+  const VERSION = '2.2.43';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -953,6 +953,7 @@
       .${P}-item .meta{color:var(--c-sub2);font-size:11px;margin-top:2px}
       .${P}-nop{color:#ff6b6b}
       .${P}-mark{color:var(--c-mark)}
+      .${P}-hit{background:#ffe08a;color:#1a1a1a;border-radius:2px}
       .${P}-jump{background:var(--c-btnbg);color:var(--c-sub);border:1px solid var(--c-btnbd);border-radius:5px;
         padding:3px 8px;font-size:11px;cursor:pointer;white-space:nowrap;flex-shrink:0}
       .${P}-jump:hover{color:var(--c-tx)}
@@ -1413,6 +1414,27 @@
   let ro = null;          // IntersectionObserver
   let kwTimer = null;
 
+  function appendQuery(parent, text, q) {
+    const src = String(text || '');
+    const needle = String(q || '').toLowerCase();
+    if (!needle) { parent.textContent = src; return; }
+    const lower = src.toLowerCase();
+    let i = 0;
+    let guard = 0;
+    while (i < src.length && guard < 80) {
+      guard++;
+      const at = lower.indexOf(needle, i);
+      if (at < 0) break;
+      if (at > i) parent.appendChild(document.createTextNode(src.slice(i, at)));
+      const mark = document.createElement('span');
+      mark.className = `${P}-hit`;
+      mark.textContent = src.slice(at, at + needle.length);
+      parent.appendChild(mark);
+      i = at + needle.length;
+    }
+    if (i < src.length) parent.appendChild(document.createTextNode(src.slice(i)));
+  }
+
   function buildRow(c) {
     const row = document.createElement('div');
     row.className = `${P}-item`;
@@ -1431,7 +1453,8 @@
     const main = document.createElement('div');
     main.className = 'm';
     const msgDiv = document.createElement('div');
-    msgDiv.textContent = c.message || '(空评论)';   // 安全：永远 textContent
+    if (c.message) appendQuery(msgDiv, c.message, filterKw);
+    else msgDiv.textContent = '(空评论)';
     main.appendChild(msgDiv);
 
     const meta = document.createElement('div');
