@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.24
+// @version      2.2.25
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.24';
+  const VERSION = '2.2.25';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -64,6 +64,7 @@
   let lastListPaint = 0;
   let savedTitle = '';
   let deleting = false;
+  let confirming = false;
   let aborted = false;
   let batchResults = null;            // Map(rpid → 'ok'|'uncertain'|'fail')，最近一次批次
   let recheckCache = null;            // Map('oid:type' → {map, complete})  区域全量walk缓存（批次内）
@@ -1340,9 +1341,9 @@
     const nDel = shown.filter((c) => c.oid && c.type && selected.has(c.rpid)).length;
     const dsel = document.getElementById(`${P}-dsel`);
     const dall = document.getElementById(`${P}-dall`);
-    if (dsel) { dsel.disabled = !nDel || deleting || fetching; dsel.textContent = `🔥 删除选中 (${nDel})`; }
+    if (dsel) { dsel.disabled = !nDel || deleting || fetching || confirming; dsel.textContent = `🔥 删除选中 (${nDel})`; }
     if (dall) {
-      dall.disabled = !vis.length || deleting || fetching;
+      dall.disabled = !vis.length || deleting || fetching || confirming;
       dall.textContent = `${filtersOn() ? '💣 删除当前' : '💣 删除全部'} (${vis.length})`;
       dall.title = filtersOn() ? '只删除当前筛选里能删的评论，不会动被筛掉的' : '删除列表里能删的全部评论';
     }
@@ -1353,13 +1354,13 @@
         const st = jm.get(Number(c.rpid));
         if (st === 'fail' || st === 'uncertain') bad++;
       }
-      copyBtn.style.display = bad && !deleting ? 'inline-block' : 'none';
+      copyBtn.style.display = bad && !deleting && !confirming ? 'inline-block' : 'none';
       copyBtn.textContent = `复制未成功 (${bad})`;
     }
     const retryBtn = document.getElementById(`${P}-retry`);
     if (retryBtn) {
       const nRetry = badInList().length;
-      retryBtn.style.display = nRetry && !deleting ? 'inline-block' : 'none';
+      retryBtn.style.display = nRetry && !deleting && !confirming ? 'inline-block' : 'none';
       retryBtn.textContent = `↻ 重试未成功 (${nRetry})`;
     }
     const cnt = document.getElementById(`${P}-cnt`);
@@ -1466,6 +1467,13 @@
 
   /* ═══════════ 控制器：删除 ═══════════ */
   async function runDelete(mode, explicitTargets, scopeLabel) {
+    if (deleting || fetching || confirming) {
+      setStatus('已有任务在进行，请等它结束或先关掉确认框。');
+      return;
+    }
+    confirming = true;
+    updCount();
+    try {
     let targets, scope;
     if (mode === 'explicit' && explicitTargets) {
       targets = explicitTargets; scope = scopeLabel || '重试';
@@ -1684,6 +1692,10 @@
     lockWhileDeleting(false);
     armStop(false);
     renderList(); updCount();
+    } finally {
+      confirming = false;
+      if (!deleting) updCount();
+    }
   }
 
   /* ═══════════ 小部件 ═══════════ */
@@ -1749,17 +1761,24 @@
     return ` ${parts.join(' · ')}${extra.length ? ' · ' + extra.join(' · ') : ''}`;
   }
 
+  let askOpen = false;
   function ask(text, okLabel) {
+    if (askOpen) {
+      setStatus('请先处理当前确认框。');
+      return Promise.resolve(false);
+    }
     return new Promise((resolve) => {
       const mask = document.getElementById(`${P}-ask`);
       const msg = document.getElementById(`${P}-askmsg`);
       const ok = document.getElementById(`${P}-askok`);
       const no = document.getElementById(`${P}-askno`);
       if (!mask || !msg || !ok || !no) { resolve(false); return; }
+      askOpen = true;
       msg.textContent = text;
       ok.textContent = okLabel || '确认';
       mask.style.display = 'flex';
       const done = (v) => {
+        askOpen = false;
         mask.style.display = 'none';
         ok.onclick = null;
         no.onclick = null;
