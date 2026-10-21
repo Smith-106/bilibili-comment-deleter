@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.120
+// @version      2.2.121
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.120';
+  const VERSION = '2.2.121';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -52,6 +52,7 @@
   /* ═══════════ 状态 ═══════════ */
   let comments = [];                  // {rpid, oid, type, message, ctime, root, src}
   const rpidSet = new Set();          // O(1) 去重索引
+  const byRpid = new Map();           // 规范 rpid → 已收录评论
   let datasetUid = '';                // 枚举时所属 UID（防换号误解）
   let selected = new Set();
   let anchorRpid = 0;
@@ -380,11 +381,18 @@
   function hasClash(c) {
     return !!(c && (c.placeClash || c.rootConflict || c.srcConflict));
   }
+  function rpidKey(v) {
+    const s = String(v == null ? '' : v).trim();
+    if (!s) return '';
+    if (!/^\d+$/.test(s)) return s;
+    return BigInt(s).toString();
+  }
   function addIfAbsent(item) {
-    if (!item || !item.rpid || !item.oid || !item.type) return false;
-    if (rpidSet.has(item.rpid)) {
-      const cur = comments.find((c) => c.rpid === item.rpid);
-      if (!cur) return false;
+    if (!item || !item.oid || !item.type) return false;
+    const key = rpidKey(item.rpid);
+    if (!key) return false;
+    const cur = byRpid.get(key);
+    if (cur) {
       const nextMsg = String(item.message || '');
       const curMsg = String(cur.message || '');
       if (nextMsg.length > curMsg.length) {
@@ -426,12 +434,14 @@
     }
     comments.push(item);
     rpidSet.add(item.rpid);
+    byRpid.set(key, item);
     return true;
   }
 
   function resetDataset() {
     comments = [];
     rpidSet.clear();
+    byRpid.clear();
     selected.clear();
     datasetUid = '';
     batchResults = null;
