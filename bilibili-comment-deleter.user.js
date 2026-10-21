@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.6
+// @version      2.2.7
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.6';
+  const VERSION = '2.2.7';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -743,6 +743,7 @@
           <span style="color:var(--c-sub);font-size:12px">ms</span>
         </div>
         <label><input type="checkbox" id="${P}-recheck" checked> 删除后官方单条确认（不信 code=0；仍在则自动降速重试）</label>
+        <label><input type="checkbox" id="${P}-skipok" checked> 跳过日志里已确认删除的（重跑枚举时不再打这些接口）</label>
       </div>
       <div class="${P}-strip">
         <div class="r">
@@ -892,6 +893,7 @@
       const saved = JSON.parse(localStorage.getItem(P) || '{}');
       if (saved.delay) $el(`${P}-delay`).value = saved.delay;
       if (saved.recheck === false) $el(`${P}-recheck`).checked = false;
+      if (saved.skipOk === false) $el(`${P}-skipok`).checked = false;
       if (saved.theme === 'light') panel.setAttribute('data-theme', 'light');
       if (saved.left && saved.top && Number(saved.left) > 0 && Number(saved.left) < window.innerWidth - 100
           && Number(saved.top) > 0 && Number(saved.top) < window.innerHeight - 60) {
@@ -903,6 +905,17 @@
     } catch (e) { /* noop */ }
     $el(`${P}-delay`).addEventListener('change', saveSettings);
     $el(`${P}-recheck`).addEventListener('change', saveSettings);
+    $el(`${P}-skipok`).addEventListener('change', saveSettings);
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || !(deleting || fetching)) return;
+      const tag = e.target && e.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      aborted = true;
+      const stop = $el(`${P}-stop`);
+      if (stop) stop.disabled = true;
+      setStatus('正在停止（Esc），等当前这一次请求结束…');
+      log('Esc 停止…（当前请求结束后退出）', 'warn');
+    });
 
     /* —— 初始状态 —— */
     const csrf = getCookie('bili_jct');
@@ -918,6 +931,7 @@
       localStorage.setItem(P, JSON.stringify({
         delay: parseInt(document.getElementById(`${P}-delay`).value, 10) || DELAY_DEFAULT,
         recheck: document.getElementById(`${P}-recheck`).checked,
+        skipOk: document.getElementById(`${P}-skipok`).checked,
         theme: panel && panel.getAttribute('data-theme') || 'dark',
         left: panel && panel.style.left ? parseInt(panel.style.left, 10) : 0,
         top: panel && panel.style.top ? parseInt(panel.style.top, 10) : 0,
@@ -1186,7 +1200,21 @@
       targets = visibleComments().filter((c) => c.oid && c.type && selected.has(c.rpid));
       scope = '筛选下选中';
     }
-    if (!targets.length) { setStatus('没有可删除的评论。'); return; }
+    let skippedOk = 0;
+    const skipBox = document.getElementById(`${P}-skipok`);
+    if (skipBox && skipBox.checked) {
+      const jm = journalMap();
+      const kept = [];
+      for (const c of targets) {
+        if (jm.get(Number(c.rpid)) === 'ok') skippedOk++;
+        else kept.push(c);
+      }
+      targets = kept;
+    }
+    if (!targets.length) {
+      setStatus(skippedOk ? `没有待删除项。已跳过 ${skippedOk} 条日志里已确认删除的。` : '没有可删除的评论。');
+      return;
+    }
 
     const csrf = getCookie('bili_jct');
     if (!csrf) { setStatus('❌ 未检测到 bili_jct（登录态），请先登录并刷新页面。'); return; }
@@ -1200,7 +1228,8 @@
     const delay = Math.max(200, parseInt(document.getElementById(`${P}-delay`).value, 10) || DELAY_DEFAULT);
     const per = delay + (recheckOn ? 600 : 0);
     const sample = String(targets[0].message || '(空评论)').replace(/\s+/g, ' ').slice(0, 36);
-    if (!confirm(`即将删除 ${targets.length} 条（${scope}）。\n间隔 ${delay}ms，回查${recheckOn ? '开' : '关'}，预计 ${fmtEta(targets.length * per)}。\n首条：${sample}\n\n不可撤销。确认删除？`)) return;
+    const skipNote = skippedOk ? `\n已跳过 ${skippedOk} 条已确认删除。` : '';
+    if (!confirm(`即将删除 ${targets.length} 条（${scope}）。\n间隔 ${delay}ms，回查${recheckOn ? '开' : '关'}，预计 ${fmtEta(targets.length * per)}。${skipNote}\n首条：${sample}\n\n不可撤销。确认删除？`)) return;
 
     deleting = true; aborted = false;
     batchResults = new Map();
@@ -1222,7 +1251,7 @@
       markActive(c.rpid);
       setProg(i, targets.length, '①删除');
       const leftDel = (targets.length - i) * delay + (recheckOn ? targets.length * 600 : 0);
-      setStatus(`①删除 ${i + 1}/${targets.length} · 已受理 ${pending.length} · 直接失败 ${fail} · 剩余 ${fmtEta(leftDel)}`);
+      setStatus(`①删除 ${i + 1}/${targets.length} · ${String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22)} · 剩余 ${fmtEta(leftDel)}`);
 
       let result = null;          // 'ok' | 'uncertain' | 'fail'
       let submittedPending = false;
@@ -1278,7 +1307,7 @@
         const c = pending[i];
         markActive(c.rpid);
         setProg(i, pending.length, '②回查');
-        setStatus(`②回查 ${i + 1}/${pending.length} · 已确认 ${ok} · 未生效 ${fail} · 待确认 ${uncertain} · 剩余 ${fmtEta((pending.length - i) * 600)}`);
+        setStatus(`②回查 ${i + 1}/${pending.length} · ${String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22)} · 已确认 ${ok} · 剩余 ${fmtEta((pending.length - i) * 600)}`);
         let v = null;
         try { v = await recheckDefinitive(c); } catch (e) { v = null; }
         if (v && v.state === 'fail' && !aborted) {
