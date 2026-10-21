@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.7
+// @version      2.2.8
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.7';
+  const VERSION = '2.2.8';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -546,7 +546,7 @@
   }
 
   async function jumpTo(c) {
-    if (!c.oid) { alert('该评论缺少 oid，无法跳转'); return; }
+    if (!c.oid) { setStatus('该评论缺少 oid，无法跳转。'); return; }
     let url = null;
     if (c.type === 1) {
       const bv = await aidToBvid(c.oid);
@@ -560,7 +560,7 @@
       url = `https://www.bilibili.com/bangumi/play/ep${c.oid}#reply${c.rpid}`;
     }
     if (url) window.open(url, '_blank');
-    else alert(`暂不支持 ${typeText(c.type)} 的跳转（oid=${c.oid}）`);
+    else setStatus(`暂不支持 ${typeText(c.type)} 的跳转（oid=${c.oid}）。`);
   }
 
   /* ═══════════ 导出备份 ═══════════ */
@@ -738,6 +738,7 @@
           <button class="${P}-btn ${P}-btn-d" id="${P}-dsel" disabled>🔥 删除选中</button>
           <button class="${P}-btn ${P}-btn-d" id="${P}-dall" disabled>💣 删除全部</button>
           <button class="${P}-btn ${P}-retry" id="${P}-retry">↻ 重试未成功</button>
+          <button class="${P}-btn ${P}-retry" id="${P}-copybad" type="button">复制未成功</button>
           <span style="color:var(--c-sub);font-size:12px">间隔</span>
           <input class="${P}-input" type="number" id="${P}-delay" value="${DELAY_DEFAULT}" min="200" max="5000" step="50">
           <span style="color:var(--c-sub);font-size:12px">ms</span>
@@ -848,6 +849,22 @@
       runDelete('explicit', targets, '重试未成功');
     };
     $el(`${P}-retry`).style.display = 'none';
+    $el(`${P}-copybad`).onclick = async () => {
+      const jm = journalMap();
+      const ids = comments.filter((c) => {
+        const st = jm.get(Number(c.rpid));
+        return st === 'fail' || st === 'uncertain';
+      }).map((c) => c.rpid);
+      if (!ids.length) { setStatus('没有未成功的 rpid 可复制。'); return; }
+      const text = ids.join('\n');
+      try {
+        await navigator.clipboard.writeText(text);
+        setStatus(`已复制 ${ids.length} 个未成功 rpid。`);
+      } catch (e) {
+        setStatus('复制失败。请允许剪贴板，或从日志里复制。');
+        log(`未成功 rpid：${ids.join(',')}`, 'warn');
+      }
+    };
 
     /* —— 列表事件委托（万级数据不挂） —— */
     const listEl = $el(`${P}-list`);
@@ -1088,6 +1105,16 @@
     const dall = document.getElementById(`${P}-dall`);
     if (dsel) { dsel.disabled = !nDel || deleting || fetching; dsel.textContent = `🔥 删除选中 (${nDel})`; }
     if (dall) { dall.disabled = !vis.length || deleting || fetching; dall.textContent = `💣 删除全部 (${vis.length})`; }
+    const copyBtn = document.getElementById(`${P}-copybad`);
+    if (copyBtn) {
+      let bad = 0;
+      for (const c of comments) {
+        const st = jm.get(Number(c.rpid));
+        if (st === 'fail' || st === 'uncertain') bad++;
+      }
+      copyBtn.style.display = bad && !deleting ? 'inline-block' : 'none';
+      copyBtn.textContent = `复制未成功 (${bad})`;
+    }
     const cnt = document.getElementById(`${P}-cnt`);
     if (cnt) cnt.textContent = `${nSel}/${vis.length} · 已删${okN} 失败${failN} 待确认${uncN}`;
   }
@@ -1182,7 +1209,7 @@
   }
 
   function lockWhileDeleting(locked) {
-    ['dsel', 'dall', 'retry', 'load', 'hist', 'import', 'reset'].forEach((k) => {
+    ['dsel', 'dall', 'retry', 'copybad', 'load', 'hist', 'import', 'reset'].forEach((k) => {
       const el = document.getElementById(`${P}-${k}`);
       if (el) el.disabled = locked;
     });
@@ -1344,7 +1371,19 @@
     markActive(null);
     setProg(targets.length, targets.length, aborted ? '已停止' : '完成');
     const sec = Math.max(1, Math.round((Date.now() - t0) / 1000));
-    const sum = `${aborted ? '已停止。' : '完成：'}确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}${shadowFixed ? `（影子重试救回 ${shadowFixed}）` : ''}。用时 ${sec}s。`;
+    let focusNote = '';
+    if (fail > 0) {
+      filtState = 'fail';
+      const sel = document.getElementById(`${P}-statesel`);
+      if (sel) sel.value = 'fail';
+      focusNote = ' 列表已切到「未生效」。';
+    } else if (uncertain > 0) {
+      filtState = 'uncertain';
+      const sel = document.getElementById(`${P}-statesel`);
+      if (sel) sel.value = 'uncertain';
+      focusNote = ' 列表已切到「待确认」。';
+    }
+    const sum = `${aborted ? '已停止。' : '完成：'}确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}${shadowFixed ? `（影子重试救回 ${shadowFixed}）` : ''}。用时 ${sec}s。${focusNote}`;
     setStatus(sum);
     log(`==== ${sum} ====`, fail ? 'warn' : 'ok');
     deleting = false;
