@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.15
+// @version      2.2.16
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.15';
+  const VERSION = '2.2.16';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -307,6 +307,7 @@
         data = await gmGetJSON(url, { timeoutMs: 20000, retries: 1 });
       } catch (e) {
         if (aicuUrl === AICU_APIS[0]) {
+          setStatus(`主接口失败（${e.message}），正在换备用接口重试第 ${page} 页…`);
           log(`主接口失败（${e.message}），切换备用…`, 'warn');
           aicuUrl = AICU_APIS[1];
           continue;
@@ -316,6 +317,7 @@
 
       if (data.code !== 0) {
         if (aicuUrl === AICU_APIS[0]) {
+          setStatus(`主接口返回 code=${data.code}，正在换备用接口重试第 ${page} 页…`);
           log(`主接口返回 code=${data.code}，切换备用…`, 'warn');
           aicuUrl = AICU_APIS[1];
           continue;
@@ -336,8 +338,10 @@
       for (const it of replies) {
         if (addIfAbsent(mapAicuReply(it))) added++;
       }
-      log(`第 ${page} 页: +${added} 条（累计 ${comments.length}${total ? '/' + total : ''}）`, 'info');
-      setStatus(`枚举第 ${page} 页 · 累计 ${comments.length}${total ? '/' + total : ''} · 本页 +${added}`);
+      const host = aicuUrl === AICU_APIS[0] ? '主接口' : '备用接口';
+      const skipped = replies.length - added;
+      log(`第 ${page} 页（${host}）: +${added} 条（累计 ${comments.length}${total ? '/' + total : ''}）`, 'info');
+      setStatus(`枚举第 ${page} 页 · ${host} · 累计 ${comments.length}${total ? '/' + total : ''} · 本页 +${added}${skipped ? ` · 跳过 ${skipped}` : ''}`);
       touchList(true);
       if (total) setProg(Math.min(comments.length, total), total, '枚举');
 
@@ -362,8 +366,8 @@
       const url = `https://api.bilibili.com/x/web-interface/history/cursor?type=archive&ps=${HISTORY_PS}&max=${cursorMax}&view_at=${viewAt}`;
       let data;
       try { data = await gmGetJSON(url); }
-      catch (e) { log(`历史翻页失败: ${e.message}`, 'err'); break; }
-      if (data.code !== 0) { log(`历史接口错误: ${data.message || data.code}`, 'err'); break; }
+      catch (e) { setStatus(`历史翻页失败：${e.message}`); log(`历史翻页失败: ${e.message}`, 'err'); break; }
+      if (data.code !== 0) { setStatus(`历史接口错误：${data.message || data.code}`); log(`历史接口错误: ${data.message || data.code}`, 'err'); break; }
 
       const list = (data.data && data.data.list) || [];
       if (!list.length) break;
@@ -378,17 +382,22 @@
     }
 
     log(`观看历史共 ${seenAids.size} 个视频，逐个扫描（每视频 ${scanPages} 页，时间序）…`);
+    let videoFail = 0;
     for (let hi = 0; hi < aids.length; hi++) {
       if (aborted) break;
       const aid = aids[hi];
-      setStatus(`扫描视频 ${hi + 1}/${aids.length} · 已找到 ${comments.length} 条`);
+      setStatus(`扫描视频 ${hi + 1}/${aids.length} · 已找到 ${comments.length} 条${videoFail ? ` · 失败 ${videoFail}` : ''}`);
       touchList(false);
       setProg(hi, aids.length, '扫描');
       try { await fetchOwnRepliesFromVideo(aid, mid, scanPages); }
-      catch (e) { log(`视频 ${aid} 扫描失败: ${e.message}`, 'warn'); }
+      catch (e) {
+        videoFail++;
+        setStatus(`视频 av${aid} 扫描失败：${e.message} · 继续下一个（失败 ${videoFail}）`);
+        log(`视频 ${aid} 扫描失败: ${e.message}`, 'warn');
+      }
       await sleep(HISTORY_VIDEO_DELAY);
     }
-    log(`官方历史扫描结束，本来源新增 ${comments.filter((c) => c.src === 'history').length} 条`, 'ok');
+    log(`官方历史扫描结束，本来源新增 ${comments.filter((c) => c.src === 'history').length} 条${videoFail ? `，${videoFail} 个视频失败` : ''}`, videoFail ? 'warn' : 'ok');
   }
 
   async function fetchOwnRepliesFromVideo(aid, mid, scanPages) {
