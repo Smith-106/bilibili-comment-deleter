@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.4
+// @version      2.2.5
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.4';
+  const VERSION = '2.2.5';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -195,6 +195,22 @@
       meta.appendChild(b);
     }
     b.textContent = state === 'ok' ? ' ·已确认删除✓' : state === 'fail' ? ' ·未生效' : ' ·待确认';
+  }
+
+  /** 标出正在处理的行，并只在列表内部滚动，不带动整页 */
+  function markActive(rpid) {
+    const list = document.getElementById(`${P}-list`);
+    if (!list) return;
+    const prev = list.querySelector(`.${P}-item.${P}-hot`);
+    if (prev) prev.classList.remove(`${P}-hot`);
+    if (rpid == null) return;
+    const row = list.querySelector(`.${P}-item[data-rpid="${rpid}"]`);
+    if (!row) return;
+    row.classList.add(`${P}-hot`);
+    const lr = list.getBoundingClientRect();
+    const rr = row.getBoundingClientRect();
+    if (rr.top < lr.top) list.scrollTop -= (lr.top - rr.top + 8);
+    else if (rr.bottom > lr.bottom) list.scrollTop += (rr.bottom - lr.bottom + 8);
   }
 
   /* ═══════════ 数据层 ═══════════ */
@@ -639,6 +655,8 @@
       .${P}-item{display:flex;align-items:flex-start;gap:8px;padding:8px 18px;border-bottom:1px solid var(--c-rowbd);
         font-size:12px;transition:background .12s}
       .${P}-item:hover{background:var(--c-hover)}
+      .${P}-item.${P}-hot{background:rgba(0,161,214,.18);box-shadow:inset 0 0 0 1px rgba(0,161,214,.55)}
+      @media (prefers-reduced-motion: reduce){ .${P}-item{transition:none} }
       .${P}-item input{accent-color:#00a1d6;cursor:pointer;margin-top:3px;flex-shrink:0}
       .${P}-item .m{flex:1;min-width:0;word-break:break-all;color:var(--c-tx)}
       .${P}-item .meta{color:var(--c-sub2);font-size:11px;margin-top:2px}
@@ -988,6 +1006,7 @@
   function renderList() {
     const listEl = document.getElementById(`${P}-list`);
     if (!listEl) return;
+    const keep = listEl.scrollTop;
     if (ro) { ro.disconnect(); ro = null; }
     viewSnap = visibleComments();
     viewOffset = 0;
@@ -1016,7 +1035,9 @@
       ro.observe(sent);
     }
     appendChunk();
+    while (keep > 0 && viewOffset < viewSnap.length && listEl.scrollHeight <= keep + listEl.clientHeight) appendChunk();
     updCount();
+    listEl.scrollTop = keep;
   }
 
   function updCount() {
@@ -1031,10 +1052,11 @@
       else if (st === 'fail') failN++;
       else if (st === 'uncertain') uncN++;
     }
+    const nDel = shown.filter((c) => c.oid && c.type && selected.has(c.rpid)).length;
     const dsel = document.getElementById(`${P}-dsel`);
     const dall = document.getElementById(`${P}-dall`);
-    if (dsel) dsel.disabled = !vis.length || deleting || fetching;
-    if (dall) dall.disabled = !vis.length || deleting || fetching;
+    if (dsel) { dsel.disabled = !nDel || deleting || fetching; dsel.textContent = `🔥 删除选中 (${nDel})`; }
+    if (dall) { dall.disabled = !vis.length || deleting || fetching; dall.textContent = `💣 删除全部 (${vis.length})`; }
     const cnt = document.getElementById(`${P}-cnt`);
     if (cnt) cnt.textContent = `${nSel}/${vis.length} · 已删${okN} 失败${failN} 待确认${uncN}`;
   }
@@ -1178,6 +1200,7 @@
     for (let i = 0; i < targets.length; i++) {
       if (aborted) { log('⏹ 已停止', 'warn'); break; }
       const c = targets[i];
+      markActive(c.rpid);
       setProg(i, targets.length, '①删除');
       setStatus(`①删除 ${i + 1}/${targets.length} · 已受理 ${pending.length} · 直接失败 ${fail}`);
 
@@ -1202,6 +1225,7 @@
         }
         if (j.code === -509) {
           const wait = 2000 * (attempt + 1);
+          setStatus(`限流 -509，${Math.round(wait / 1000)}s 后重试 ${attempt + 1}/${DELETE_MAX_RETRY - 1} · rpid=${c.rpid}`);
           log(`⏳ 限流 -509，${wait}ms 后重试（${attempt + 1}/${DELETE_MAX_RETRY - 1}）…`, 'warn');
           await sleep(wait); attempt++;
           continue;
@@ -1232,6 +1256,7 @@
       for (let i = 0; i < pending.length; i++) {
         if (aborted) break;
         const c = pending[i];
+        markActive(c.rpid);
         setProg(i, pending.length, '②回查');
         setStatus(`②回查 ${i + 1}/${pending.length} · 已确认 ${ok} · 未生效 ${fail} · 待确认 ${uncertain}`);
         let v = null;
@@ -1267,6 +1292,7 @@
       }
     }
 
+    markActive(null);
     setProg(targets.length, targets.length, aborted ? '已停止' : '完成');
     const sec = Math.max(1, Math.round((Date.now() - t0) / 1000));
     const sum = `${aborted ? '已停止。' : '完成：'}确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}${shadowFixed ? `（影子重试救回 ${shadowFixed}）` : ''}。用时 ${sec}s。`;
@@ -1275,7 +1301,6 @@
     deleting = false;
     lockWhileDeleting(false);
     armStop(false);
-    showProg(false);
     renderList(); updCount();
 
     if (fail + uncertain > 0) {
