@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.39
+// @version      2.2.40
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.39';
+  const VERSION = '2.2.40';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1746,7 +1746,7 @@
     const sample = String(targets[0].message || '(空评论)').replace(/\s+/g, ' ').slice(0, 36);
     const skipNote = skippedOk ? `\n已跳过 ${skippedOk} 条已确认删除。` : '';
     lockWhileDeleting(true);
-    if (!(await ask(`即将删除 ${targets.length} 条（${scope}）。\n间隔 ${delay}ms，回查${recheckOn ? '开' : '关'}，预计 ${fmtEta(targets.length * per)}。${skipNote}\n首条：${sample}\n\n不可撤销。`, '删除'))) return;
+    if (!(await ask(`即将删除 ${targets.length} 条（${scope}）。\n间隔 ${delay}ms，回查${recheckOn ? '开' : '关（受理不算已删）'}，预计 ${fmtEta(targets.length * per)}。${skipNote}\n首条：${sample}\n\n不可撤销。`, '删除'))) return;
 
     deleting = true; aborted = false;
     batchResults = new Map();
@@ -1785,8 +1785,8 @@
         const codeStr = String(j.code);
         if (j.code === 0 || j.code === 12022 || j.code === -404) {
           if (!recheckOn) {
-            result = 'ok';
-            log(j.code === 0 ? `✓ 已提交删除 rpid=${c.rpid}` : `• ${j.code}：评论已不存在 rpid=${c.rpid}`);
+            result = j.code === 0 ? 'uncertain' : 'ok';
+            log(j.code === 0 ? `✓ 已提交（未回查，不算已删） rpid=${c.rpid}` : `• ${j.code}：评论已不存在 rpid=${c.rpid}`, j.code === 0 ? 'warn' : 'info');
           } else {
             submittedPending = true;
             log(`${j.code === 0 ? '✓' : '•'} ${j.code === 0 ? '接口已受理（不等于已删）' : `接口${j.code}（视为已不存在）`}，待官方确认 rpid=${c.rpid}`);
@@ -1933,7 +1933,8 @@
     const unsent = targets.length - seen;
     const stopBits = [unsent ? `未请求 ${unsent}` : '', recheckLeft ? `回查未完成 ${recheckLeft}` : ''].filter(Boolean).join('，');
     const skipBit = skippedOk ? `跳过已确认 ${skippedOk}。` : '';
-    const sum = `${aborted ? '已停止。' : '完成：'}确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}${shadowFixed ? `（影子重试救回 ${shadowFixed}）` : ''}。用时 ${sec}s。${skipBit}${stopBits ? stopBits + '。' : ''}${focusNote}`;
+    const trust = recheckOn ? '' : '未开回查，接口受理的记为待确认。';
+    const sum = `${aborted ? '已停止。' : '完成：'}确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}${shadowFixed ? `（影子重试救回 ${shadowFixed}）` : ''}。用时 ${sec}s。${trust}${skipBit}${stopBits ? stopBits + '。' : ''}${focusNote}`;
     saveLastRun(sum);
     setStatus(sum);
     log(`==== ${sum} ====`, fail ? 'warn' : 'ok');
