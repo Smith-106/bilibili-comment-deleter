@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.165
+// @version      2.2.166
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.165';
+  const VERSION = '2.2.166';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2740,7 +2740,7 @@
       seen++;
       const c = targets[i];
       markActive(c.rpid);
-      setProg(i + 1, targets.length, '①删除');
+      setProg(i + 1, targets.length, '①删除', recheckOn ? { from: 0, size: 50 } : null);
       const leftDel = (targets.length - i) * delay + (recheckOn ? targets.length * 600 : 0);
       const snippet = takeChars(String(c.message || '(空)').replace(/\s+/g, ' '), 22, false);
 
@@ -2837,7 +2837,7 @@
         }
         const c = pending[i];
         markActive(c.rpid);
-        setProg(i + 1, pending.length, '②回查');
+        setProg(i + 1, pending.length, '②回查', { from: 50, size: 50 });
         const snippet = takeChars(String(c.message || '(空)').replace(/\s+/g, ' '), 22, false);
         let v = null;
         try {
@@ -2928,7 +2928,8 @@
     markActive(null);
     const unsent = targets.length - seen;
     const endPhase = aborted ? '已停止' : (fail || uncertain || unsent || recheckLeft) ? '未完全删除' : '完成';
-    if (recheckLeft && pending.length) setProg(Math.max(0, pending.length - recheckLeft), pending.length, endPhase);
+    if (recheckOn && pending.length) setProg(Math.max(0, pending.length - recheckLeft), pending.length, endPhase, { from: 50, size: 50 });
+    else if (recheckOn) setProg(Math.min(seen, targets.length), targets.length, endPhase, { from: 0, size: 50 });
     else setProg(Math.min(seen, targets.length), targets.length, endPhase);
     const sec = Math.max(1, Math.round((Date.now() - t0) / 1000));
     let focusNote = '';
@@ -3195,11 +3196,19 @@
       document.getElementById(`${P}-pct`).textContent = '0%';
     } else paintBusy(null);
   }
-  function setProg(done, total, phase) {
-    const pct = total ? Math.round((done / total) * 100) : 0;
+  function progPct(done, total, span) {
+    const part = total ? Math.min(1, Math.max(0, done / total)) : 0;
+    const from = span && span.from ? span.from : 0;
+    const size = span && span.size != null ? span.size : 100;
+    return Math.round(from + part * size);
+  }
+  function setProg(done, total, phase, span) {
+    const pct = progPct(done, total, span);
     const fill = document.getElementById(`${P}-fill`);
     const pctEl = document.getElementById(`${P}-pct`);
-    const label = `${phase ? phase + ' ' : ''}${pct}% (${done}/${total})`;
+    const label = span
+      ? `${phase ? phase + ' ' : ''}${done}/${total} · 总进度 ${pct}%`
+      : `${phase ? phase + ' ' : ''}${pct}% (${done}/${total})`;
     if (fill) fill.style.width = pct + '%';
     if (pctEl) pctEl.textContent = label;
     if (phase) paintBusy(label);
