@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.137
+// @version      2.2.138
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.137';
+  const VERSION = '2.2.138';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2484,7 +2484,7 @@
       seen++;
       const c = targets[i];
       markActive(c.rpid);
-      setProg(i, targets.length, '①删除');
+      setProg(i + 1, targets.length, '①删除');
       const leftDel = (targets.length - i) * delay + (recheckOn ? targets.length * 600 : 0);
       const snippet = String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22);
 
@@ -2581,7 +2581,7 @@
         }
         const c = pending[i];
         markActive(c.rpid);
-        setProg(i, pending.length, '②回查');
+        setProg(i + 1, pending.length, '②回查');
         const snippet = String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22);
         let v = null;
         try {
