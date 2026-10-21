@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.20
+// @version      2.2.21
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.20';
+  const VERSION = '2.2.21';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -210,10 +210,36 @@
     }
     return { n: m.size, ok, bad };
   }
+  function journalCompact(list) {
+    const seen = new Set();
+    const out = [];
+    for (const e of list || []) {
+      const id = Number(e && e.rpid);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push({ rpid: id, state: e.state, t: e.t || 0 });
+    }
+    return out;
+  }
+
+  let journalCompactNote = '';
+  function journalNormalize() {
+    try {
+      const raw = journalLoad();
+      const next = journalCompact(raw).slice(0, JOURNAL_CAP);
+      if (next.length === raw.length) return;
+      localStorage.setItem(JKEY, JSON.stringify(next));
+      journalMapCache = null;
+      const dropped = raw.length - next.length;
+      if (dropped > 0) journalCompactNote = ` 已合并 ${dropped} 条重复记录。`;
+    } catch (e) { /* 打不开就不改 */ }
+  }
+
   function journalAdd(rpid, state) {
     try {
-      const j = journalLoad();
-      j.unshift({ rpid: Number(rpid), state, t: Date.now() });
+      const id = Number(rpid);
+      const j = journalCompact(journalLoad()).filter((e) => e.rpid !== id);
+      j.unshift({ rpid: id, state, t: Date.now() });
       if (j.length > JOURNAL_CAP && !journalTrimWarned) {
         journalTrimWarned = true;
         log(`处理记录超过 ${JOURNAL_CAP} 条，更早的已丢弃。那些评论再出现时不会被当成已删除。`, 'warn');
@@ -1076,8 +1102,9 @@
     /* —— 初始状态 —— */
     const csrf = getCookie('bili_jct');
     const uid = getCookie('DedeUserID');
+    journalNormalize();
     const remembered = journalStats();
-    const mem = remembered.n ? ` 本地记录 ${remembered.n} 条（已确认 ${remembered.ok}，未成功 ${remembered.bad}）。` : '';
+    const mem = (remembered.n ? ` 本地记录 ${remembered.n} 条（已确认 ${remembered.ok}，未成功 ${remembered.bad}）。` : '') + journalCompactNote;
     if (csrf && uid) setStatus(`已登录 UID=${uid}，bili_jct 就绪。删除不可逆，请谨慎。${mem}`);
     else setStatus(`⚠️ 未检测到登录态（请先在 bilibili.com 登录后刷新）。可先导入/浏览，删除需登录。${mem}`);
     renderList(); updCount();
