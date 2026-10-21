@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.149
+// @version      2.2.150
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.149';
+  const VERSION = '2.2.150';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2043,12 +2043,18 @@
     }
     return hits;
   }
+  function reasonHit(c, q) {
+    const needle = String(q || '').toLowerCase();
+    if (!needle) return '';
+    const why = journalWhy(c && c.rpid);
+    return why && why.toLowerCase().includes(needle) ? why : '';
+  }
 
   function visibleComments() {
     let list = comments;
     if (filterKw) {
       const q = filterKw.toLowerCase();
-      list = list.filter((c) => (c.message || '').toLowerCase().includes(q) || idHit(c, q).length);
+      list = list.filter((c) => (c.message || '').toLowerCase().includes(q) || idHit(c, q).length || reasonHit(c, q));
     }
     if (filtSrc !== 'all') list = list.filter((c) => c.src === filtSrc);
     if (filtType !== 'all') list = list.filter((c) => String(c.type) === filtType);
@@ -2159,6 +2165,14 @@
         const hit = document.createElement('span');
         hit.className = `${P}-mark`;
         hit.textContent = ` ·命中 ${hits.join('/')}`;
+        meta.appendChild(hit);
+      }
+      const whyHit = inMsg || hits.length ? '' : reasonHit(c, q);
+      if (whyHit) {
+        const hit = document.createElement('span');
+        hit.className = `${P}-mark`;
+        hit.textContent = ' ·命中原因';
+        hit.title = whyHit;
         meta.appendChild(hit);
       }
     }
