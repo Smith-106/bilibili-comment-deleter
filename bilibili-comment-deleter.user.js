@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.30
+// @version      2.2.31
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.30';
+  const VERSION = '2.2.31';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -287,7 +287,13 @@
     const prev = list.querySelector(`.${P}-item.${P}-hot`);
     if (prev) prev.classList.remove(`${P}-hot`);
     if (rpid == null) return;
-    const row = list.querySelector(`.${P}-item[data-rpid="${rpid}"]`);
+    let row = list.querySelector(`.${P}-item[data-rpid="${rpid}"]`);
+    if (!row) {
+      const idx = viewSnap.findIndex((c) => String(c.rpid) === String(rpid));
+      let guard = 0;
+      while (idx >= 0 && viewOffset <= idx && guard < 30) { appendChunk(); guard++; }
+      row = list.querySelector(`.${P}-item[data-rpid="${rpid}"]`);
+    }
     if (!row) return;
     row.classList.add(`${P}-hot`);
     const lr = list.getBoundingClientRect();
@@ -1829,7 +1835,8 @@
     }
     const unsent = targets.length - seen;
     const stopBits = [unsent ? `未请求 ${unsent}` : '', recheckLeft ? `回查未完成 ${recheckLeft}` : ''].filter(Boolean).join('，');
-    const sum = `${aborted ? '已停止。' : '完成：'}确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}${shadowFixed ? `（影子重试救回 ${shadowFixed}）` : ''}。用时 ${sec}s。${stopBits ? stopBits + '。' : ''}${focusNote}`;
+    const skipBit = skippedOk ? `跳过已确认 ${skippedOk}。` : '';
+    const sum = `${aborted ? '已停止。' : '完成：'}确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}${shadowFixed ? `（影子重试救回 ${shadowFixed}）` : ''}。用时 ${sec}s。${skipBit}${stopBits ? stopBits + '。' : ''}${focusNote}`;
     setStatus(sum);
     log(`==== ${sum} ====`, fail ? 'warn' : 'ok');
     deleting = false;
