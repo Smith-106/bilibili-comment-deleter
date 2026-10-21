@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.46
+// @version      2.2.47
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.46';
+  const VERSION = '2.2.47';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1687,8 +1687,14 @@
     const myUid = requireLogin();
     if (!myUid) { setStatus('❌ 未登录，官方历史扫描需要登录态。'); return; }
     const btn = document.getElementById(`${P}-hist`);
+    const pagesEl = document.getElementById(`${P}-scanpages`);
+    const pagesTitle = pagesEl ? pagesEl.title : '';
     btn.disabled = true; fetching = true; aborted = false;
     document.getElementById(`${P}-load`).disabled = true;
+    if (pagesEl) {
+      pagesEl.disabled = true;
+      pagesEl.title = '这次扫描已经开始，页数不能改。停掉之后再改，下次生效。';
+    }
     armStop(true);
     setStatus('官方历史扫描：翻历史 → 逐视频扫评论（仅视频，aicu 的兜底）…');
     showProg(true);
@@ -1712,6 +1718,7 @@
     } finally {
       btn.disabled = false; fetching = false;
       document.getElementById(`${P}-load`).disabled = false;
+      if (pagesEl) { pagesEl.disabled = false; pagesEl.title = pagesTitle; }
       armStop(false);
       showProg(false);
       updCount();
