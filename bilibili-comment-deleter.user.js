@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.21
+// @version      2.2.22
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.21';
+  const VERSION = '2.2.22';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -88,6 +88,13 @@
     const m = Math.floor(s / 60);
     const r = s % 60;
     return r ? `约 ${m} 分 ${r} 秒` : `约 ${m} 分`;
+  }
+  function fmtDur(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return `${s} 秒`;
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return r ? `${m} 分 ${r} 秒` : `${m} 分`;
   }
 
   function fmtTime(t) {
@@ -859,7 +866,7 @@
             <option value="12">专栏</option><option value="17">动态</option><option value="21">直播</option>
           </select></label>
           <label>结果 <select class="${P}-sel" id="${P}-statesel" title="按处理结果筛选">
-             <option value="all">全部</option><option value="ok">已删除</option>
+             <option value="all">全部</option><option value="bad">未成功</option><option value="ok">已删除</option>
              <option value="fail">未生效</option><option value="uncertain">待确认</option>
              <option value="none">未处理</option>
            </select></label>
@@ -1157,7 +1164,9 @@
       const jm = journalMap();
       list = list.filter((c) => {
         const st = jm.get(c.rpid);
-        return filtState === 'none' ? !st : st === filtState;
+        if (filtState === 'none') return !st;
+        if (filtState === 'bad') return st === 'fail' || st === 'uncertain';
+        return st === filtState;
       });
     }
     if (sortMode === 'tasc') list = [...list].sort((a, b) => (a.ctime || 0) - (b.ctime || 0));
@@ -1483,7 +1492,7 @@
       markActive(c.rpid);
       setProg(i, targets.length, '①删除');
       const leftDel = (targets.length - i) * delay + (recheckOn ? targets.length * 600 : 0);
-      setStatus(`①删除 ${i + 1}/${targets.length} · ${String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22)} · 剩余 ${fmtEta(leftDel)}`);
+      setStatus(`①删除 ${i + 1}/${targets.length} · ${String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22)} · 已用 ${fmtDur(Date.now() - t0)} · 剩余 ${fmtEta(leftDel)}`);
 
       let result = null;          // 'ok' | 'uncertain' | 'fail'
       let submittedPending = false;
@@ -1554,7 +1563,7 @@
         const c = pending[i];
         markActive(c.rpid);
         setProg(i, pending.length, '②回查');
-        setStatus(`②回查 ${i + 1}/${pending.length} · ${String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22)} · 已确认 ${ok} · 剩余 ${fmtEta((pending.length - i) * 600)}`);
+        setStatus(`②回查 ${i + 1}/${pending.length} · ${String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22)} · 已确认 ${ok} · 已用 ${fmtDur(Date.now() - t0)} · 剩余 ${fmtEta((pending.length - i) * 600)}`);
         let v = null;
         try { v = await recheckDefinitive(c); } catch (e) { v = null; }
         if (v && v.state === 'auth') {
@@ -1614,7 +1623,12 @@
     setProg(targets.length, targets.length, aborted ? '已停止' : '完成');
     const sec = Math.max(1, Math.round((Date.now() - t0) / 1000));
     let focusNote = '';
-    if (fail > 0) {
+    if (fail > 0 && uncertain > 0) {
+      filtState = 'bad';
+      const sel = document.getElementById(`${P}-statesel`);
+      if (sel) sel.value = 'bad';
+      focusNote = ' 列表已切到「未成功」（含未生效和待确认）。';
+    } else if (fail > 0) {
       filtState = 'fail';
       const sel = document.getElementById(`${P}-statesel`);
       if (sel) sel.value = 'fail';
