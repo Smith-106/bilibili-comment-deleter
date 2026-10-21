@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.121
+// @version      2.2.122
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.121';
+  const VERSION = '2.2.122';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -235,8 +235,9 @@
     if (journalMapCache) return journalMapCache;
     const m = new Map();
     for (const e of journalLoad()) {
-      const id = Number(e.rpid);
-      if (!m.has(id)) m.set(id, e.state);
+      const id = idExact(e.rpid);
+      if (!id || m.has(id)) continue;
+      m.set(id, e.state);
     }
     journalMapCache = m;
     return m;
@@ -255,7 +256,7 @@
     const seen = new Set();
     const out = [];
     for (const e of list || []) {
-      const id = Number(e && e.rpid);
+      const id = idExact(e && e.rpid);
       if (!id || seen.has(id)) continue;
       seen.add(id);
       const why = clipWhy(e.why);
@@ -285,16 +286,18 @@
     if (!journalWhyCache) {
       journalWhyCache = new Map();
       for (const e of journalLoad()) {
-        const id = Number(e.rpid);
-        if (!journalWhyCache.has(id) && e.why) journalWhyCache.set(id, clipWhy(e.why));
+        const id = idExact(e.rpid);
+        if (!id || journalWhyCache.has(id) || !e.why) continue;
+        journalWhyCache.set(id, clipWhy(e.why));
       }
     }
-    return journalWhyCache.get(Number(rpid)) || '';
+    return journalWhyCache.get(idExact(rpid)) || '';
   }
   function journalAdd(rpid, state, why) {
     const note = clipWhy(why);
     try {
-      const id = Number(rpid);
+      const id = idExact(rpid);
+      if (!id) return;
       const j = journalCompact(journalLoad()).filter((e) => e.rpid !== id);
       const row = { rpid: id, state, t: Date.now() };
       if (note) row.why = note;
@@ -381,14 +384,22 @@
   function hasClash(c) {
     return !!(c && (c.placeClash || c.rootConflict || c.srcConflict));
   }
+  function idExact(v) {
+    if (v == null || v === '') return 0;
+    const s = String(v).trim();
+    if (!/^\d+$/.test(s)) return 0;
+    const canon = BigInt(s).toString();
+    if (canon === '0') return 0;
+    if (BigInt(canon) <= BigInt(Number.MAX_SAFE_INTEGER)) return Number(canon);
+    return canon;
+  }
   function rpidKey(v) {
-    const s = String(v == null ? '' : v).trim();
-    if (!s) return '';
-    if (!/^\d+$/.test(s)) return s;
-    return BigInt(s).toString();
+    const id = idExact(v);
+    return id ? String(id) : '';
   }
   function addIfAbsent(item) {
     if (!item || !item.oid || !item.type) return false;
+    item.rpid = idExact(item.rpid);
     const key = rpidKey(item.rpid);
     if (!key) return false;
     const cur = byRpid.get(key);
@@ -404,9 +415,10 @@
         filledRows++;
       }
       let meta = false;
-      const nextRoot = Number(item.root) || 0;
-      if (!Number(cur.root) && nextRoot) { cur.root = nextRoot; meta = true; }
-      else if (Number(cur.root) && nextRoot && Number(cur.root) !== nextRoot && !cur.rootConflict) {
+      const nextRoot = rpidKey(item.root);
+      const curRoot = rpidKey(cur.root);
+      if (!curRoot && nextRoot) { cur.root = idExact(item.root); meta = true; }
+      else if (curRoot && nextRoot && curRoot !== nextRoot && !cur.rootConflict) {
         cur.rootConflict = true;
         rootClash++;
       }
@@ -423,9 +435,11 @@
       }
       if (item.srcConflict && !cur.srcConflict) { cur.srcConflict = true; marked = true; }
       if (marked) restoredMarks++;
-      const nextOid = Number(item.oid) || 0;
+      const nextOid = rpidKey(item.oid);
+      const curOid = rpidKey(cur.oid);
       const nextType = Number(item.type) || 0;
-      if (!cur.placeClash && ((nextOid && Number(cur.oid) !== nextOid) || (nextType && Number(cur.type) !== nextType))) {
+      const curType = Number(cur.type) || 0;
+      if (!cur.placeClash && ((nextOid && curOid && nextOid !== curOid) || (nextType && curType && nextType !== curType))) {
         cur.placeClash = true;
         placeClash++;
       }
@@ -460,9 +474,9 @@
 
   /** aicu 条目、原始单页，或本工具自己导出的扁对象 → 规范对象 */
   function mapAicuReply(it) {
-    const rpid = Number(it && it.rpid);
+    const rpid = idExact(it && it.rpid);
     const dyn = (it && it.dyn) || {};
-    const oid = Number((dyn && dyn.oid) || (it && it.oid));
+    const oid = idExact((dyn && dyn.oid) || (it && it.oid));
     const type = Number((dyn && dyn.type) || (it && it.type));
     if (!rpid || !oid || !type) return null;
     const parent = (it && it.parent) || {};
@@ -477,7 +491,7 @@
       rootConflict: flagOn(it && it.rootConflict),
       srcConflict: flagOn(it && it.srcConflict),
       ctime: Number((it && (it.time || it.ctime)) || 0) || 0,
-      root: parent.rootid ? Number(parent.rootid) : (Number(it && it.root) || 0),
+      root: parent.rootid ? idExact(parent.rootid) : (idExact(it && it.root) || 0),
       src: 'aicu',
     };
   }
@@ -711,7 +725,7 @@
       if (Number(r.mid) !== mid) continue;
       const clip = clipMessage(r.content && r.content.message);
       if (addIfAbsent({
-        rpid: Number(r.rpid),
+        rpid: idExact(r.rpid),
         oid: aid,
         type: 1,
         message: clip.message,
@@ -774,14 +788,14 @@
       for (const top of tops) {
         const preview = Array.isArray(top.replies) ? top.replies : [];
         const pool = [{ r: top, root: 0 }].concat(
-          preview.map((s) => ({ r: s, root: Number(top.rpid) || 0 }))
+          preview.map((s) => ({ r: s, root: idExact(top.rpid) || 0 }))
         );
         for (const entry of pool) {
           const r = entry.r;
           if (Number(r.mid) === mid) {
             const clip = clipMessage(r.content && r.content.message);
             const item = {
-              rpid: Number(r.rpid),
+              rpid: idExact(r.rpid),
               oid: aid,
               type: 1,
               message: clip.message,
@@ -794,7 +808,7 @@
           }
         }
         const rcount = Number(top.rcount);
-        const rootId = Number(top.rpid) || 0;
+        const rootId = idExact(top.rpid) || 0;
         if (rcount > preview.length && rootId && !queued.has(rootId)) {
           queued.add(rootId);
           const seen = preview.some((s) => Number(s.mid) === mid);
@@ -1159,7 +1173,7 @@
       const have = new Set(j.map((e) => e.rpid));
       let n = 0;
       for (const p of pairs) {
-        const id = Number(p.rpid);
+        const id = idExact(p.rpid);
         if (!id || have.has(id) || !p.state) continue;
         have.add(id);
         const row = { rpid: id, state: p.state, t: Date.now() };
@@ -1185,7 +1199,7 @@
   }
 
   function stateLabel(rpid) {
-    const st = journalMap().get(Number(rpid));
+    const st = journalMap().get(idExact(rpid));
     return st === 'ok' ? '已删除' : st === 'fail' ? '未生效' : st === 'uncertain' ? '待确认' : '';
   }
 
@@ -1580,7 +1594,7 @@
     $el(`${P}-copybad`).onclick = async () => {
       const jm = journalMap();
       const ids = comments.filter((c) => {
-        const st = jm.get(Number(c.rpid));
+        const st = jm.get(idExact(c.rpid));
         return st === 'fail' || st === 'uncertain';
       }).map((c) => `${c.rpid}\t${journalWhy(c.rpid)}`);
       if (!ids.length) { setStatus('没有未成功的 rpid 可复制。'); return; }
@@ -1608,19 +1622,19 @@
       if (!e.target.matches('input[type="checkbox"]')) return;
       if (e.target.dataset.skip === '1') { e.target.dataset.skip = ''; return; }
       if (deleting || confirming) {
-        const rpid = Number(e.target.dataset.rpid);
+        const rpid = idExact(e.target.dataset.rpid);
         e.target.checked = selected.has(rpid);
         noteSelLocked();
         return;
       }
-      const rpid = Number(e.target.dataset.rpid);
+      const rpid = idExact(e.target.dataset.rpid);
       e.target.checked ? selected.add(rpid) : selected.delete(rpid);
       updCount();
     });
     listEl.addEventListener('click', (e) => {
       const cp = e.target.closest('button[data-act="copyid"]');
       if (cp) {
-        const c = comments.find((x) => x.rpid === Number(cp.dataset.rpid));
+        const c = comments.find((x) => x.rpid === idExact(cp.dataset.rpid));
         const text = c ? `rpid=${c.rpid}\toid=${c.oid || ''}\ttype=${c.type || ''}` : `rpid=${cp.dataset.rpid}`;
         navigator.clipboard.writeText(text).then(() => {
           setStatus(c ? `已复制 rpid=${c.rpid} oid=${c.oid || '无'} type=${c.type || '无'}` : `已复制 ${text}`);
@@ -1629,7 +1643,7 @@
       }
       const jb = e.target.closest('button[data-act="jump"]');
       if (jb) {
-        const c = comments.find((x) => x.rpid === Number(jb.dataset.rpid));
+        const c = comments.find((x) => x.rpid === idExact(jb.dataset.rpid));
         if (c) jumpTo(c);
         return;
       }
@@ -1637,7 +1651,7 @@
       if (deleting || confirming) { noteSelLocked(); return; }
       const row = e.target.closest(`.${P}-item`);
       if (!row) return;
-      const rpid = Number(row.dataset.rpid);
+      const rpid = idExact(row.dataset.rpid);
       if (!rpid) return;
       const rowItem = comments.find((x) => x.rpid === rpid);
       if (rowItem && (!rowItem.oid || !rowItem.type)) {
@@ -2100,7 +2114,7 @@
     if (copyBtn) {
       let bad = 0;
       for (const c of comments) {
-        const st = jm.get(Number(c.rpid));
+        const st = jm.get(idExact(c.rpid));
         if (st === 'fail' || st === 'uncertain') bad++;
       }
       copyBtn.style.display = bad && !deleting && !confirming ? 'inline-block' : 'none';
@@ -2313,7 +2327,7 @@
       const jm = journalMap();
       const kept = [];
       for (const c of targets) {
-        if (jm.get(Number(c.rpid)) === 'ok') skippedOk++;
+        if (jm.get(idExact(c.rpid)) === 'ok') skippedOk++;
         else kept.push(c);
       }
       targets = kept;
@@ -2670,7 +2684,7 @@
   function badInList() {
     const jm = journalMap();
     return comments.filter((c) => {
-      const st = jm.get(Number(c.rpid));
+      const st = jm.get(idExact(c.rpid));
       return c.oid && c.type && (st === 'fail' || st === 'uncertain');
     });
   }
@@ -2711,7 +2725,7 @@
     for (const c of comments) {
       const name = typeText(c.type);
       by.set(name, (by.get(name) || 0) + 1);
-      const st = jm.get(Number(c.rpid));
+      const st = jm.get(idExact(c.rpid));
       if (st === 'ok') ok++;
       else if (st === 'fail' || st === 'uncertain') bad++;
       if (!c.oid || !c.type) nodeal++;
