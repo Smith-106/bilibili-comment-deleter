@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.53
+// @version      2.2.54
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.53';
+  const VERSION = '2.2.54';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1662,7 +1662,15 @@
       retryBtn.textContent = `↻ 重试未成功 (${nRetry})`;
     }
     const cnt = document.getElementById(`${P}-cnt`);
-    if (cnt) cnt.textContent = `${nSel}/${vis.length} · 已删${okN} 失败${failN} 待确认${uncN}`;
+    if (cnt) {
+      let outside = 0;
+      if (filtersOn()) {
+        const visIds = new Set(shown.map((c) => c.rpid));
+        for (const id of selected) if (!visIds.has(id)) outside++;
+      }
+      cnt.textContent = `${nSel}/${vis.length} · 已删${okN} 失败${failN} 待确认${uncN}${outside ? ` · 筛选外已勾${outside}` : ''}`;
+      cnt.title = outside ? '这些勾选不在当前筛选里。删除选中不会动它们。清除筛选后会重新出现。' : '';
+    }
   }
 
   function onFilter(live) {
