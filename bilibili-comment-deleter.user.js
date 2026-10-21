@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.59
+// @version      2.2.60
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.59';
+  const VERSION = '2.2.60';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1741,6 +1741,7 @@
     armStop(true);
     setStatus('AICU 枚举中…（每页 500 条，间隔 3s 防风控）');
     showProg(true);
+    const had = comments.length;
     try {
       log(`开始 AICU 枚举 UID=${myUid}`);
       datasetUid = myUid;
@@ -1754,9 +1755,12 @@
       setStatus(aicuSum);
       log(`${aicuHead}，累计 ${comments.length} 条`, aborted ? 'warn' : 'ok');
     } catch (e) {
-      saveLastRun(`枚举失败：${e.message}`);
-      setStatus(`❌ 枚举失败：${e.message}`);
-      log(`枚举失败: ${e.message}`, 'err');
+      stopBeat();
+      const added = comments.length - had;
+      const kept = added > 0 ? `这次已经收下 ${added} 条，还在列表里。` : '这次没有新收下评论。';
+      saveLastRun(`枚举失败：${e.message}。${kept}`);
+      setStatus(`❌ 枚举失败：${e.message}。${kept}`);
+      log(`枚举失败: ${e.message}。${kept}`, 'err');
     } finally {
       btn.disabled = false; fetching = false;
       document.getElementById(`${P}-hist`).disabled = false;
@@ -1781,6 +1785,7 @@
     armStop(true);
     setStatus('官方历史扫描：翻历史 → 逐视频扫评论（仅视频，aicu 的兜底）…');
     showProg(true);
+    const had = comments.length;
     try {
       if (datasetUid && datasetUid !== myUid) log(`⚠️ 列表属于 UID=${datasetUid}，本次扫描账号 UID=${myUid}`, 'warn');
       else if (!datasetUid) datasetUid = myUid;
@@ -1795,9 +1800,12 @@
       setStatus(histSum);
       log(histHead, aborted ? 'warn' : 'ok');
     } catch (e) {
-      saveLastRun(`官方扫描失败：${e.message}`);
-      setStatus(`❌ 官方扫描失败：${e.message}`);
-      log(`官方扫描失败: ${e.message}`, 'err');
+      stopBeat();
+      const added = comments.length - had;
+      const kept = added > 0 ? `这次已经收下 ${added} 条，还在列表里。` : '这次没有新收下评论。';
+      saveLastRun(`官方扫描失败：${e.message}。${kept}`);
+      setStatus(`❌ 官方扫描失败：${e.message}。${kept}`);
+      log(`官方扫描失败: ${e.message}。${kept}`, 'err');
     } finally {
       btn.disabled = false; fetching = false;
       document.getElementById(`${P}-load`).disabled = false;
