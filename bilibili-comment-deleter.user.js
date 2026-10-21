@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.145
+// @version      2.2.146
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.145';
+  const VERSION = '2.2.146';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -533,6 +533,13 @@
     const full = String(s || '');
     return { message: full.slice(0, 200), cut: full.length > 200 };
   }
+  function replyText(it) {
+    if (!it) return '';
+    if (it.message != null && String(it.message).trim() !== '') return it.message;
+    const content = it.content;
+    if (content && content.message != null) return content.message;
+    return '';
+  }
 
   /** aicu 条目、原始单页，或本工具自己导出的扁对象 → 规范对象 */
   function mapAicuReply(it) {
@@ -542,7 +549,7 @@
     const type = Number((dyn && dyn.type) || (it && it.type));
     if (!rpid || !oid || !type) return null;
     const parent = (it && it.parent) || {};
-    const clip = clipMessage(it && it.message);
+    const clip = clipMessage(replyText(it));
     return {
       rpid,
       oid,
@@ -814,7 +821,7 @@
     for (const r of rs) {
       if (!rpidKey(replyMid(r))) { noAuthor++; continue; }
       if (rpidKey(replyMid(r)) !== mid) continue;
-      const clip = clipMessage(r.content && r.content.message);
+      const clip = clipMessage(replyText(r));
       if (addIfAbsent({
         rpid: idExact(r.rpid),
         oid: aid,
@@ -890,7 +897,7 @@
           const r = entry.r;
           if (!rpidKey(replyMid(r))) { noAuthor++; pageNoAuthor++; continue; }
           if (rpidKey(replyMid(r)) === mid) {
-            const clip = clipMessage(r.content && r.content.message);
+            const clip = clipMessage(replyText(r));
             const item = {
               rpid: idExact(r.rpid),
               oid: aid,
