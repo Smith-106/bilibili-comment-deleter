@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.35
+// @version      2.2.36
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.35';
+  const VERSION = '2.2.36';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1655,9 +1655,20 @@
   }
 
   function lockWhileDeleting(locked) {
-    ['dsel', 'dall', 'retry', 'copybad', 'load', 'hist', 'import', 'reset', 'forget'].forEach((k) => {
+    const keys = ['dsel', 'dall', 'retry', 'copybad', 'load', 'hist', 'import', 'reset', 'forget',
+      'kw', 'filter', 'clearf', 'srcsel', 'typesel', 'statesel', 'sortsel', 'selall', 'selnone', 'expj', 'expc'];
+    const why = '删除确认或进行中，筛选和导出先锁住，避免列表和正在删的范围对不上';
+    keys.forEach((k) => {
       const el = document.getElementById(`${P}-${k}`);
-      if (el) el.disabled = locked;
+      if (!el) return;
+      el.disabled = locked;
+      if (locked) {
+        if (el.dataset.lockTitle == null) el.dataset.lockTitle = el.title || '';
+        el.title = why;
+      } else if (el.dataset.lockTitle != null) {
+        el.title = el.dataset.lockTitle;
+        delete el.dataset.lockTitle;
+      }
     });
   }
 
@@ -1709,6 +1720,7 @@
     const per = delay + (recheckOn ? 600 : 0);
     const sample = String(targets[0].message || '(空评论)').replace(/\s+/g, ' ').slice(0, 36);
     const skipNote = skippedOk ? `\n已跳过 ${skippedOk} 条已确认删除。` : '';
+    lockWhileDeleting(true);
     if (!(await ask(`即将删除 ${targets.length} 条（${scope}）。\n间隔 ${delay}ms，回查${recheckOn ? '开' : '关'}，预计 ${fmtEta(targets.length * per)}。${skipNote}\n首条：${sample}\n\n不可撤销。`, '删除'))) return;
 
     deleting = true; aborted = false;
@@ -1906,7 +1918,10 @@
     renderList(); updCount();
     } finally {
       confirming = false;
-      if (!deleting) updCount();
+      if (!deleting) {
+        lockWhileDeleting(false);
+        updCount();
+      }
     }
   }
 
