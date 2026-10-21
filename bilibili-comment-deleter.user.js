@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.74
+// @version      2.2.75
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.74';
+  const VERSION = '2.2.75';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -54,6 +54,7 @@
   let selected = new Set();
   let anchorRpid = 0;
   let filterKw = '';                  // 关键词
+  let onlyClash = false;
   let filtSrc = 'all';
   let filtType = 'all';
   let filtState = 'all';          // all | ok | fail | uncertain | none
@@ -378,7 +379,7 @@
     selected.clear();
     datasetUid = '';
     batchResults = null;
-    filterKw = ''; filtSrc = 'all'; filtType = 'all'; filtState = 'all'; sortMode = 'default';
+    filterKw = ''; filtSrc = 'all'; filtType = 'all'; filtState = 'all'; onlyClash = false; sortMode = 'default';
     syncFilterControls();
     const rb = document.getElementById(`${P}-retry`);
     if (rb) rb.style.display = 'none';
@@ -1153,6 +1154,7 @@
            <label>排序 <select class="${P}-sel" id="${P}-sortsel">
             <option value="default">默认</option><option value="tasc">时间↑</option><option value="tdesc">时间↓</option>
           </select></label>
+          <label title="只显示 oid、类型或楼层和后一次不一致的"><input type="checkbox" id="${P}-clashonly"> 只看冲突</label>
           <button class="${P}-btn" id="${P}-selall" style="padding:4px 10px" title="勾选当前筛选。按住 Shift 再点两行，会连选中间">全选</button>
           <button class="${P}-btn" id="${P}-selnone" style="padding:4px 10px" title="去掉全部勾选，包括当前筛选外面的">全不选</button>
           <button class="${P}-btn" id="${P}-expj" title="导出当前筛选下列表为 JSON（删除前备份）">💾JSON</button>
@@ -1238,6 +1240,11 @@
     $el(`${P}-srcsel`).onchange = () => { filtSrc = $el(`${P}-srcsel`).value; renderList(); updCount(); };
     $el(`${P}-typesel`).onchange = () => { filtType = $el(`${P}-typesel`).value; renderList(); updCount(); };
     $el(`${P}-statesel`).onchange = () => { filtState = $el(`${P}-statesel`).value; renderList(); updCount(); };
+    $el(`${P}-clashonly`).onchange = () => {
+      onlyClash = $el(`${P}-clashonly`).checked;
+      renderList(); updCount();
+      setStatus(onlyClash ? `只看冲突：当前 ${visibleComments().length} 条。` : '已取消只看冲突。');
+    };
     $el(`${P}-kw`).addEventListener('input', () => {
       clearTimeout(kwTimer);
       kwTimer = setTimeout(() => onFilter(true), 250);
@@ -1510,7 +1517,7 @@
   }
 
   function filtersOn() {
-    return !!(filterKw || filtSrc !== 'all' || filtType !== 'all' || filtState !== 'all');
+    return !!(filterKw || filtSrc !== 'all' || filtType !== 'all' || filtState !== 'all' || onlyClash);
   }
 
   function filterBits() {
@@ -1520,6 +1527,7 @@
     if (filtSrc !== 'all') bits.push(`来源 ${SRC_TEXT[filtSrc] || filtSrc}`);
     if (filtType !== 'all') bits.push(`类型 ${typeText(filtType)}`);
     if (filtState !== 'all') bits.push(`结果 ${stateName[filtState] || filtState}`);
+    if (onlyClash) bits.push('只看冲突');
     return bits;
   }
 
@@ -1530,6 +1538,8 @@
       const el = document.getElementById(id);
       if (el && el.value !== val) el.value = val;
     }
+    const clash = document.getElementById(`${P}-clashonly`);
+    if (clash && clash.checked !== onlyClash) clash.checked = onlyClash;
   }
 
   function clearFilters() {
@@ -1537,6 +1547,7 @@
     filtSrc = 'all';
     filtType = 'all';
     filtState = 'all';
+    onlyClash = false;
     syncFilterControls();
     renderList();
     setStatus('筛选已清除。排序还在。');
@@ -1571,6 +1582,7 @@
         return st === filtState;
       });
     }
+    if (onlyClash) list = list.filter((c) => c.placeClash || c.rootConflict);
     if (sortMode === 'tasc') list = [...list].sort((a, b) => (a.ctime || 0) - (b.ctime || 0));
     else if (sortMode === 'tdesc') list = [...list].sort((a, b) => (b.ctime || 0) - (a.ctime || 0));
     return list;
@@ -1940,7 +1952,7 @@
 
   function lockWhileDeleting(locked) {
     const keys = ['dsel', 'dall', 'retry', 'copybad', 'load', 'hist', 'import', 'reset', 'forget',
-      'kw', 'filter', 'clearf', 'srcsel', 'typesel', 'statesel', 'sortsel', 'selall', 'selnone', 'expj', 'expc',
+      'kw', 'filter', 'clearf', 'srcsel', 'typesel', 'statesel', 'sortsel', 'clashonly', 'selall', 'selnone', 'expj', 'expc',
       'delay', 'recheck', 'skipok'];
     const whyFixed = '这次删除已经按开始时的间隔、回查和跳过设置在跑。停掉之后再改，下次生效';
     const why = '删除确认或进行中，筛选和导出先锁住，避免列表和正在删的范围对不上';
@@ -2007,7 +2019,7 @@
     const sample = String(targets[0].message || '(空评论)').replace(/\s+/g, ' ').slice(0, 36);
     const skipNote = skippedOk ? `\n已跳过 ${skippedOk} 条已确认删除。` : '';
     const clashN = targets.filter((c) => c.placeClash || c.rootConflict).length;
-    const clashNote = clashN ? `\n其中 ${clashN} 条位置或楼层和后一次不一致，删除仍用先看到的。` : '';
+    const clashNote = clashN ? `\n其中 ${clashN} 条位置或楼层和后一次不一致，删除仍用先看到的。${onlyClash ? '' : '\n可先勾选「只看冲突」核对。'}` : '';
     let outside = '';
     if (mode !== 'all' && mode !== 'explicit') {
       const visIds = new Set(visibleComments().map((c) => c.rpid));
@@ -2205,6 +2217,7 @@
       if (filterKw) left.push(`关键词「${filterKw}」`);
       if (filtSrc !== 'all') left.push(`来源 ${SRC_TEXT[filtSrc] || filtSrc}`);
       if (filtType !== 'all') left.push(`类型 ${typeText(filtType)}`);
+      if (onlyClash) left.push('只看冲突');
       if (left.length) focusNote += `另外还留着${left.join('、')}，被筛掉的不在眼前。`;
     }
     const unsent = targets.length - seen;
