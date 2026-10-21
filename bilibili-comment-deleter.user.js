@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.1
-// @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 全区/整楼 可判定回查 + 统一请求层（串行化/自动重试/412识别）+ 处理日志持久化 + 过滤排序导出 + 明暗主题
+// @version      2.2.2
+// @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
 // @match        *://*.bilibili.com/*
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.1';
+  const VERSION = '2.2.2';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -41,7 +41,10 @@
     '-412': '被风控拦截（换网络/降速）',
     '-509': '频率限制',
     '12022': '评论原本就不存在',
+    '12006': '评论不存在（官方单条）',
   };
+  const SHADOW_RETRY = 2;            // 接口回 0 但评论仍在时的自动重试次数
+  const SHADOW_WAIT = 2500;          // 影子重试间隔（比正常删除更慢，避开风控假成功）
   const SRC_TEXT = { aicu: 'aicu', history: '官方历史', import: '导入', manual: '回查' };
 
   /* ═══════════ 状态 ═══════════ */
@@ -384,12 +387,12 @@
     return j;
   }
 
-  /* ═══════════ 回查：区域/楼层全量 walk（可判定版 v2.2.1） ═══════════
-   * 旧版逐条扫前 N 页内联预览 → 深层楼中楼、按热度沉底的老顶评永远"待确认"。
-   * 新策略（结果按批次缓存，删除只会移除条目，缓存不失效）：
-   *   顶评（root=0）→ /x/v2/reply/main 游标全区走完，在/不在即结论
-   *   楼中楼（root>0）→ 全区 walk 找根楼：楼没了→子评必然没了；
-   *                    楼在 → /x/v2/reply/reply 楼内全量翻页判定 */
+  /* ═══════════ 回查（v2.2.2：单条官方接口优先） ═══════════
+   * 实测：删除接口 code=0 只表示「已受理」，风控下会假成功（评论仍在）。
+   * 优先 GET /x/v2/reply/detail?type&oid&root&rpid：
+   *   12006 / -404 = 不存在（终判已删）；code=0 = 仍可见（未生效）。
+   * 单条接口不可用时才退回 v2.2.1 的全区/整楼 walk（巨区翻页不现实）。
+   * walk 结果按批次缓存，删除只会移除条目，缓存不失效。 */
   const RECHECK_TOP_MAX = 200;      // 区域顶评 walk 页数上限（游标制）
   const RECHECK_SUB_PS = 49;        // 楼内每页条数（官方页面大小）
   const RECHECK_SUB_MAX = 60;       // 楼内最多翻页数
@@ -445,8 +448,26 @@
     return res;
   }
 
+  /** 官方单条 oracle。顶评 root 用自身 rpid。不可判定返回 null，交给 walk。 */
+  async function oracleCheck(c) {
+    const root = c.root || c.rpid;
+    let d;
+    try {
+      d = await gmGetJSON(
+        `https://api.bilibili.com/x/v2/reply/detail?type=${c.type}&oid=${c.oid}&root=${root}&rpid=${c.rpid}`,
+        { retries: 1 }
+      );
+    } catch (e) { return null; }
+    if (!d || typeof d.code !== 'number') return null;
+    if (d.code === 12006 || d.code === -404) return { state: 'ok', why: `官方单条确认不存在(${d.code})` };
+    if (d.code === 0) return { state: 'fail', why: '官方单条仍可见（删除接口可能假成功）' };
+    return null;
+  }
+
   /** 可判定回查：{state:'ok'|'fail'|'uncertain', why}；接口不可用返回 null（按待确认处理） */
   async function recheckDefinitive(c) {
+    const quick = await oracleCheck(c);
+    if (quick) return quick;
     const area = await walkArea(c.oid, c.type);
     if (area.map.has(String(c.rpid))) {
       return { state: 'fail', why: area.map.get(String(c.rpid)) ? '楼中楼内联预览仍在' : '顶评仍在' };
@@ -659,7 +680,7 @@
           <input class="${P}-input" type="number" id="${P}-delay" value="${DELAY_DEFAULT}" min="200" max="5000" step="50">
           <span style="color:var(--c-sub);font-size:12px">ms</span>
         </div>
-        <label><input type="checkbox" id="${P}-recheck" checked> 删除后官方回查确认（已确认/待确认/未生效 三态统计）</label>
+        <label><input type="checkbox" id="${P}-recheck" checked> 删除后官方单条确认（不信 code=0；仍在则自动降速重试）</label>
       </div>
       <div class="${P}-strip">
         <div class="r">
@@ -1074,13 +1095,13 @@
     showProg(true);
     log(`🔥 开始删除 ${targets.length} 条（${scope}），间隔 ${delay}ms，回查${recheckOn ? '开' : '关'}`, 'warn');
 
-    let ok = 0, fail = 0, uncertain = 0;
+    let ok = 0, fail = 0, uncertain = 0, shadowFixed = 0;
     const pending = [];           // 已提交删除、留待统一回查的条目
     for (let i = 0; i < targets.length; i++) {
       if (aborted) { log('⏹ 已停止', 'warn'); break; }
       const c = targets[i];
-      setProg(i, targets.length);
-      setStatus(`删除阶段 ${i + 1}/${targets.length} …`);
+      setProg(i, targets.length, '①删除');
+      setStatus(`①删除 ${i + 1}/${targets.length} · 已受理 ${pending.length} · 直接失败 ${fail}`);
 
       let result = null;          // 'ok' | 'uncertain' | 'fail'
       let submittedPending = false;
@@ -1097,7 +1118,7 @@
             log(j.code === 0 ? `✓ 已提交删除 rpid=${c.rpid}` : `• ${j.code}：评论已不存在 rpid=${c.rpid}`);
           } else {
             submittedPending = true;
-            log(`${j.code === 0 ? '✓' : '•'} ${j.code === 0 ? '已提交' : `接口${j.code}（视为已删）`}，待统一回查 rpid=${c.rpid}`);
+            log(`${j.code === 0 ? '✓' : '•'} ${j.code === 0 ? '接口已受理（不等于已删）' : `接口${j.code}（视为已不存在）`}，待官方确认 rpid=${c.rpid}`);
           }
           break;
         }
@@ -1126,16 +1147,34 @@
       await sleep(delay);
     }
 
-    // ── 统一回查（v2.2.1：每区域一次全量 walk，可判定） ──
+    // ── 统一回查（v2.2.2：单条官方接口；仍在则降速重删；walk 仅兜底） ──
     if (pending.length) {
-      setStatus('回查阶段：逐区全量核对…');
-      log(`🔍 统一回查 ${pending.length} 条（顶评走 /reply/main 全区，楼中楼走 /reply/reply 整楼）`);
+      setStatus(`②回查 0/${pending.length} · 官方单条确认中…`);
+      log(`🔍 统一回查 ${pending.length} 条（先 /reply/detail 单条；不可用才全区/整楼翻页）`);
       for (let i = 0; i < pending.length; i++) {
         if (aborted) break;
         const c = pending[i];
-        setStatus(`回查 ${i + 1}/${pending.length}（oid=${c.oid}…）`);
+        setProg(i, pending.length, '②回查');
+        setStatus(`②回查 ${i + 1}/${pending.length} · 已确认 ${ok} · 未生效 ${fail} · 待确认 ${uncertain}`);
         let v = null;
         try { v = await recheckDefinitive(c); } catch (e) { v = null; }
+        if (v && v.state === 'fail' && !aborted) {
+          for (let s = 0; s < SHADOW_RETRY; s++) {
+            setStatus(`↻ 影子重试 ${s + 1}/${SHADOW_RETRY} · rpid=${c.rpid}（接口回成功但评论仍在）`);
+            log(`↻ 评论仍在，降速重试 ${s + 1}/${SHADOW_RETRY} rpid=${c.rpid}`, 'warn');
+            await sleep(SHADOW_WAIT);
+            try { await doDelete(c, csrf); } catch (e) { break; }
+            await sleep(800);
+            let again = null;
+            try { again = await oracleCheck(c); } catch (e) { again = null; }
+            if (again && again.state === 'ok') {
+              v = { state: 'ok', why: `影子失败后第${s + 1}次重试已确认删除` };
+              shadowFixed++;
+              break;
+            }
+            if (again && again.state === 'fail') v = again;
+          }
+        }
         let state, msg;
         if (!v || !v.state) { state = 'uncertain'; msg = `回查不可用（区/楼接口异常），↗跳转复核`; }
         else if (v.state === 'ok') { state = 'ok'; msg = `已确认删除（${v.why}）`; }
@@ -1150,8 +1189,8 @@
       }
     }
 
-    setProg(targets.length, targets.length);
-    const sum = `完成：确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}。`;
+    setProg(targets.length, targets.length, '完成');
+    const sum = `完成：确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}${shadowFixed ? `（影子重试救回 ${shadowFixed}）` : ''}。`;
     setStatus(sum);
     log(`==== ${sum} ====`, fail ? 'warn' : 'ok');
     deleting = false;
@@ -1187,10 +1226,12 @@
       document.getElementById(`${P}-pct`).textContent = '0%';
     }
   }
-  function setProg(done, total) {
-    const pct = Math.round((done / total) * 100);
-    document.getElementById(`${P}-fill`).style.width = pct + '%';
-    document.getElementById(`${P}-pct`).textContent = `${pct}% (${done}/${total})`;
+  function setProg(done, total, phase) {
+    const pct = total ? Math.round((done / total) * 100) : 0;
+    const fill = document.getElementById(`${P}-fill`);
+    const pctEl = document.getElementById(`${P}-pct`);
+    if (fill) fill.style.width = pct + '%';
+    if (pctEl) pctEl.textContent = `${phase ? phase + ' ' : ''}${pct}% (${done}/${total})`;
   }
 
   /* ═══════════ 初始化 ═══════════ */
