@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.111
+// @version      2.2.112
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.111';
+  const VERSION = '2.2.112';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2184,7 +2184,7 @@
     }
     confirming = true;
     updCount();
-    let ok = 0, fail = 0, uncertain = 0, shadowFixed = 0, seen = 0, recheckLeft = 0, planned = 0;
+    let ok = 0, fail = 0, uncertain = 0, shadowFixed = 0, seen = 0, recheckLeft = 0, planned = 0, stopWhy = '';
     const pending = [];           // 已提交删除、留待统一回查的条目
     try {
     let targets, scope;
@@ -2286,6 +2286,7 @@
           result = 'uncertain';
           aborted = true;
           const why = ERR_TEXT[codeStr] || `code=${j.code}`;
+          if (!stopWhy) stopWhy = why;
           setStatus(`已停止：${why}。这条算待确认，后面的还没请求。请重新登录或刷新后再试。`);
           log(`✗ rpid=${c.rpid} ${why}，停止后续删除`, 'err');
           break;
@@ -2351,6 +2352,7 @@
         finally { stopBeat(); }
         if (v && v.state === 'auth') {
           aborted = true;
+          if (!stopWhy) stopWhy = v.why;
           setStatus(`已停止回查：${v.why}。已确认的保留，没查完的不算失败。`);
           log(`回查停止：${v.why}`, 'err');
           v = { state: 'uncertain', why: v.why };
@@ -2368,6 +2370,7 @@
             if (dj && (dj.code === -101 || dj.code === -111)) {
               aborted = true;
               const why = ERR_TEXT[String(dj.code)] || `code=${dj.code}`;
+              if (!stopWhy) stopWhy = why;
               setStatus(`已停止回查：${why}。已确认的保留，没查完的不算失败。`);
               log(`回查停止：${why}`, 'err');
               v = { state: 'uncertain', why };
@@ -2382,6 +2385,7 @@
             finally { stopBeat(); }
             if (again && again.state === 'auth') {
               aborted = true;
+              if (!stopWhy) stopWhy = again.why;
               setStatus(`已停止回查：${again.why}。已确认的保留，没查完的不算失败。`);
               log(`回查停止：${again.why}`, 'err');
               v = { state: 'uncertain', why: again.why };
@@ -2450,7 +2454,7 @@
     const skipBit = skippedOk ? `跳过已确认 ${skippedOk}。` : '';
     const trust = recheckOn ? '' : '未开回查，接口受理的记为待确认。';
     const deleteBad = !!(fail || uncertain || unsent || recheckLeft || aborted);
-    const sumHead = aborted ? '已停止。' : (fail || uncertain || unsent || recheckLeft) ? '未完全删除：' : '完成：';
+    const sumHead = aborted ? `已停止。${stopWhy ? `${stopWhy}。` : ''}` : (fail || uncertain || unsent || recheckLeft) ? '未完全删除：' : '完成：';
     const sum = `${sumHead}确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}${shadowFixed ? `（影子重试救回 ${shadowFixed}）` : ''}。用时 ${sec}s。${trust}${skipBit}${stopBits ? stopBits + '。' : ''}${focusNote}`;
     saveLastRun(sum);
     setStatus(sum);
@@ -2480,7 +2484,7 @@
         if (parked && !recheckLeft) recheckLeft = parked;
         const unsentCrash = Math.max(0, planned - seen);
         const crashBits = [unsentCrash ? `未请求 ${unsentCrash} 条` : '', recheckLeft ? `回查未完成 ${recheckLeft} 条` : ''].filter(Boolean).join('，');
-        const crashText = `这次删除中途出错，已停下。已请求 ${seen}${planned ? ` / ${planned}` : ''} 条：确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}。${crashBits ? `${crashBits}。` : ''}已经发出的请求不会收回，请看日志和列表上的标记。`;
+        const crashText = `这次删除中途出错，已停下。${stopWhy ? `${stopWhy}。` : ''}已请求 ${seen}${planned ? ` / ${planned}` : ''} 条：确认删除 ${ok}，未生效 ${fail}，待确认 ${uncertain}。${crashBits ? `${crashBits}。` : ''}已经发出的请求不会收回，请看日志和列表上的标记。`;
         saveLastRun(crashText);
         setStatus(crashText);
         log(crashText, 'err');
