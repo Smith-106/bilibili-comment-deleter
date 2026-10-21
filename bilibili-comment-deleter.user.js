@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.153
+// @version      2.2.154
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.153';
+  const VERSION = '2.2.154';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -617,6 +617,15 @@
   }
 
   /* ═══════════ 枚举一：AICU 自动拉取 ═══════════ */
+  function aicuPageStamp(replies) {
+    const ids = [];
+    for (const it of replies || []) {
+      const id = rpidKey(it && it.rpid);
+      if (id) ids.push(id);
+    }
+    ids.sort();
+    return ids.join(',');
+  }
   async function fetchAicuComments(uid) {
     const t0 = Date.now();
     let page = 1;
@@ -626,6 +635,7 @@
     let invalid = 0;
     let hop = '';
     let stopReason = '';
+    let prevStamp = '';
     resetFillStats();
     const spent = () => fmtDur(Date.now() - t0);
     const before = comments.length;
@@ -697,6 +707,17 @@
         if (total && got < total) log(`AICU 说已经结束，但索引 ${total} 条，接口只返回 ${got} 条。`, 'warn');
         break;
       }
+      if (total && got >= total) {
+        log(`已经拿到索引的 ${total} 条，但接口没说结束。不再继续。`, 'warn');
+        break;
+      }
+      const stamp = aicuPageStamp(replies);
+      if (stamp && stamp === prevStamp) {
+        stopReason = '这一页和上一页是同一批评论，索引没有往下翻。后面的页没有继续。';
+        log(stopReason, 'warn');
+        break;
+      }
+      prevStamp = stamp;
       const waitUntil = Date.now() + AICU_DELAY;
       const donePage = page;
       startBeat(() => `第 ${donePage} 页完成 · ${host} · 这次 +${fresh()} · 已翻 ${got}${total ? '/' + total : ''} · 本页 +${added}${skipped ? ` · 跳过 ${skipped}` : ''}${pageInvalid ? ` · 无效 ${pageInvalid}` : ''} · ${Math.max(0, Math.ceil((waitUntil - Date.now()) / 1000))}s 后下一页 · 已用 ${spent()}`);
