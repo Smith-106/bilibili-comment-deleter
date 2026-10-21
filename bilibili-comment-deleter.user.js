@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.131
+// @version      2.2.132
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.131';
+  const VERSION = '2.2.132';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -673,6 +673,7 @@
     let threadSkipped = 0;
     let threadMore = 0;
     let threadFail = 0;
+    let videosDone = 0;
     resetFillStats();
 
     try {
@@ -721,7 +722,7 @@
       const gapNow = () => threadGapText(threadSkipped, threadMore, threadFail);
       startBeat(() => `扫描视频 ${hi + 1}/${aids.length}${pace.thread ? ` · ${pace.thread}` : ''}${gapNow() ? ` · 累计 ${gapNow()}` : ''} · 这次 +${fresh()} · 列表 ${comments.length} 条 · 已用 ${spent()}${videoFail ? ` · 失败 ${videoFail}` : ''}`);
       touchList(false);
-      setProg(hi, aids.length, '扫描');
+      setProg(hi, aids.length, `第 ${hi + 1} 个`);
       let videoNote = '';
       try {
         const scan = await fetchOwnRepliesFromVideo(aid, mid, scanPages, pace);
@@ -743,13 +744,16 @@
         videoNote = `视频 av${aid} 失败：${e.message}`;
         log(`视频 ${aid} 扫描失败: ${e.message}`, 'warn');
       }
+      videosDone = hi + 1;
+      setProg(videosDone, aids.length, aborted ? '已停止' : '已扫');
+      if (aborted) break;
       const waitUntil = Date.now() + HISTORY_VIDEO_DELAY;
       const doneAt = hi + 1;
       const running = gapNow();
       startBeat(() => `${videoNote || `视频 ${doneAt}/${aids.length} 完成`}${running ? ` · 累计 ${running}` : ''} · ${Math.max(0, Math.ceil((waitUntil - Date.now()) / 1000))}s 后下一个 · 这次 +${fresh()} · 列表 ${comments.length} 条 · 已用 ${spent()}${videoFail ? ` · 失败 ${videoFail}` : ''}`);
       await sleep(HISTORY_VIDEO_DELAY);
     }
-    return { historyStop, videoFail, cappedVideos, threadSkipped, threadMore, threadFail };
+    return { historyStop, videoFail, cappedVideos, threadSkipped, threadMore, threadFail, videosDone, videosPlanned: aids.length };
     } finally { stopBeat(); }
   }
 
@@ -2297,10 +2301,13 @@
       const histHead = aborted ? '已停止扫描' : hist.historyStop ? '官方扫描未翻完' : (videoNote || moreNote || threadNote) ? '官方扫描有遗漏' : '✅ 官方扫描完成';
       const threadTail = threadNote ? `${threadNote}。每视频最多补 ${HISTORY_THREAD_OPEN_MAX} 条楼的第一页。` : '';
       const fillNote = `${filledRows ? `补全了 ${filledRows} 条原来更短的正文。` : ''}${filledMeta ? `补上了 ${filledMeta} 条缺失的楼层或时间。` : ''}${rootClash ? `有 ${rootClash} 条的楼层和后一次不一致，仍用先看到的。` : ''}${placeClash ? `有 ${placeClash} 条的 oid 或类型和后一次不一致，删除仍用先看到的。` : ''}${filledSrc ? `补上了 ${filledSrc} 条原来没有的来源。` : ''}${srcClash ? `有 ${srcClash} 条的来源和后一次不一致，仍用先看到的。` : ''}`;
-      const histSum = `${histHead}：这次 +${added}，列表共 ${comments.length} 条。每视频最近 ${scanPages} 页，最多 ${HISTORY_VIDEO_CAP} 个视频。用时 ${fmtDur(Date.now() - t0)}。${fillNote}${hist.historyStop || ''}${videoNote}${moreNote}${threadTail}${aborted ? '后面的视频没有继续。' : ''}${digestLine()}`;
+      const stopScan = aborted
+        ? (hist.videosPlanned ? `视频扫到 ${hist.videosDone || 0}/${hist.videosPlanned} 个就停了。` : '还没收集到视频就停了。')
+        : '';
+      const histSum = `${histHead}：这次 +${added}，列表共 ${comments.length} 条。每视频最近 ${scanPages} 页，最多 ${HISTORY_VIDEO_CAP} 个视频。用时 ${fmtDur(Date.now() - t0)}。${fillNote}${hist.historyStop || ''}${videoNote}${moreNote}${threadTail}${stopScan}${digestLine()}`;
       saveLastRun(histSum);
       setStatus(histSum);
-      const histWhy = `${hist.historyStop || ''}${videoNote}${moreNote}${threadNote ? `${threadNote}。` : ''}`;
+      const histWhy = `${hist.historyStop || ''}${videoNote}${moreNote}${threadNote ? `${threadNote}。` : ''}${stopScan}`;
       log(`${histHead}，这次 +${added}，列表共 ${comments.length} 条${histWhy ? `。${histWhy}` : ''}${fillNote ? ` ${fillNote}` : ''}`, aborted || histWhy ? 'warn' : 'ok');
     } catch (e) {
       stopBeat();
