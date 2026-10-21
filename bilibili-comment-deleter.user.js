@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.18
+// @version      2.2.19
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.18';
+  const VERSION = '2.2.19';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -513,6 +513,11 @@
       try {
         d = await gmGetJSON(`https://api.bilibili.com/x/v2/reply/main?type=${type}&oid=${oid}&mode=2&next=${next}`, { retries: 1 });
       } catch (e) { log(`回查 walk 失败 oid=${oid}: ${e.message}`, 'warn'); break; }
+      if (d.code === -101 || d.code === -111) {
+        const why = ERR_TEXT[String(d.code)] || `code=${d.code}`;
+        log(`回查 walk ${why} oid=${oid}`, 'err');
+        return { map, complete: false, pages, auth: why };
+      }
       if (d.code !== 0) { log(`回查 walk code=${d.code} oid=${oid} type=${type}`, 'warn'); break; }
       pages++;
       for (const top of ((d.data && d.data.replies) || [])) {
@@ -563,6 +568,7 @@
       );
     } catch (e) { return null; }
     if (!d || typeof d.code !== 'number') return null;
+    if (d.code === -101 || d.code === -111) return { state: 'auth', why: ERR_TEXT[String(d.code)] || `code=${d.code}` };
     if (d.code === 12006 || d.code === -404) return { state: 'ok', why: `官方单条确认不存在(${d.code})` };
     if (d.code === 0) return { state: 'fail', why: '官方单条仍可见（删除接口可能假成功）' };
     return null;
@@ -573,10 +579,14 @@
     const quick = await oracleCheck(c);
     if (quick) return quick;
     const area = await walkArea(c.oid, c.type);
+    if (area.auth) return { state: 'auth', why: area.auth };
     if (area.map.has(String(c.rpid))) {
       return { state: 'fail', why: area.map.get(String(c.rpid)) ? '楼中楼内联预览仍在' : '顶评仍在' };
     }
     if (c.root) {
+      if (!area.complete && !area.map.has(String(c.root))) {
+        return { state: 'uncertain', why: '区域未翻完，不能凭根楼缺失判断子评已删' };
+      }
       if (!area.map.has(String(c.root))) return { state: 'ok', why: '根楼层已不存在，子评必然已删' };
       const th = await walkThread(c.oid, c.type, c.root);
       if (th.set.has(String(c.rpid))) return { state: 'fail', why: '楼内仍在' };
@@ -1461,6 +1471,14 @@
           }
           break;
         }
+        if (j.code === -101 || j.code === -111) {
+          result = 'uncertain';
+          aborted = true;
+          const why = ERR_TEXT[codeStr] || `code=${j.code}`;
+          setStatus(`已停止：${why}。这条算待确认，后面的还没请求。请重新登录或刷新后再试。`);
+          log(`✗ rpid=${c.rpid} ${why}，停止后续删除`, 'err');
+          break;
+        }
         if (j.code === -509 || j.code === -412 || j.code === -9000) {
           const wait = (j.code === -509 ? 2000 : 3000) * (attempt + 1);
           const why = j.code === -509 ? '限流 -509' : (j.message || `code=${j.code}`);
@@ -1506,15 +1524,37 @@
         setStatus(`②回查 ${i + 1}/${pending.length} · ${String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22)} · 已确认 ${ok} · 剩余 ${fmtEta((pending.length - i) * 600)}`);
         let v = null;
         try { v = await recheckDefinitive(c); } catch (e) { v = null; }
+        if (v && v.state === 'auth') {
+          aborted = true;
+          setStatus(`已停止回查：${v.why}。已确认的保留，没查完的不算失败。`);
+          log(`回查停止：${v.why}`, 'err');
+          v = { state: 'uncertain', why: v.why };
+        }
         if (v && v.state === 'fail' && !aborted) {
           for (let s = 0; s < SHADOW_RETRY; s++) {
             setStatus(`↻ 影子重试 ${s + 1}/${SHADOW_RETRY} · rpid=${c.rpid}（接口回成功但评论仍在）`);
             log(`↻ 评论仍在，降速重试 ${s + 1}/${SHADOW_RETRY} rpid=${c.rpid}`, 'warn');
             await sleep(SHADOW_WAIT);
-            try { await doDelete(c, csrf); } catch (e) { break; }
+            let dj = null;
+            try { dj = await doDelete(c, csrf); } catch (e) { break; }
+            if (dj && (dj.code === -101 || dj.code === -111)) {
+              aborted = true;
+              const why = ERR_TEXT[String(dj.code)] || `code=${dj.code}`;
+              setStatus(`已停止回查：${why}。已确认的保留，没查完的不算失败。`);
+              log(`回查停止：${why}`, 'err');
+              v = { state: 'uncertain', why };
+              break;
+            }
             await sleep(800);
             let again = null;
             try { again = await oracleCheck(c); } catch (e) { again = null; }
+            if (again && again.state === 'auth') {
+              aborted = true;
+              setStatus(`已停止回查：${again.why}。已确认的保留，没查完的不算失败。`);
+              log(`回查停止：${again.why}`, 'err');
+              v = { state: 'uncertain', why: again.why };
+              break;
+            }
             if (again && again.state === 'ok') {
               v = { state: 'ok', why: `影子失败后第${s + 1}次重试已确认删除` };
               shadowFixed++;
