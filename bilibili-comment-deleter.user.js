@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.107
+// @version      2.2.108
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.107';
+  const VERSION = '2.2.108';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2068,9 +2068,9 @@
       const t0 = Date.now();
       const aicu = await fetchAicuComments(myUid) || { total: 0, got: 0 };
       renderList(); updCount();
-      const aicuHead = aborted ? '已停止枚举' : aicu.stopReason ? 'AICU 枚举未完成' : '✅ AICU 枚举完成';
       const added = comments.length - had;
       const gap = (!aborted && aicu.total && aicu.got !== aicu.total) ? `索引报 ${aicu.total}，本次收下 ${aicu.got}。` : '';
+      const aicuHead = aborted ? '已停止枚举' : (aicu.stopReason || gap) ? 'AICU 枚举未完成' : '✅ AICU 枚举完成';
       const fillNote = `${filledRows ? `补全了 ${filledRows} 条原来更短的正文。` : ''}${filledMeta ? `补上了 ${filledMeta} 条缺失的楼层或时间。` : ''}${rootClash ? `有 ${rootClash} 条的楼层和后一次不一致，仍用先看到的。` : ''}${placeClash ? `有 ${placeClash} 条的 oid 或类型和后一次不一致，删除仍用先看到的。` : ''}${filledSrc ? `补上了 ${filledSrc} 条原来没有的来源。` : ''}${srcClash ? `有 ${srcClash} 条的来源和后一次不一致，仍用先看到的。` : ''}`;
       const aicuSum = `${aicuHead}：这次 +${added}，列表共 ${comments.length} 条（去重）。${fillNote}${aicu.stopReason || ''}${gap}索引可能滞后，不是官方实时列表。用时 ${fmtDur(Date.now() - t0)}。${aborted ? '后面的页没有继续。' : ''}${digestLine()}`;
       saveLastRun(aicuSum);
@@ -2117,11 +2117,11 @@
       const t0 = Date.now();
       const hist = await fetchHistoryComments(myUid, scanPages) || {};
       renderList(); updCount();
-      const histHead = aborted ? '已停止扫描' : hist.historyStop ? '官方扫描未翻完' : '✅ 官方扫描完成';
       const added = comments.length - had;
       const videoNote = hist.videoFail ? `${hist.videoFail} 个视频没扫成。` : '';
       const moreNote = hist.cappedVideos ? `${hist.cappedVideos} 个视频后面还有评论，这次没翻。` : '';
       const threadNote = threadGapText(hist.threadSkipped, hist.threadMore, hist.threadFail);
+      const histHead = aborted ? '已停止扫描' : hist.historyStop ? '官方扫描未翻完' : (videoNote || moreNote || threadNote) ? '官方扫描有遗漏' : '✅ 官方扫描完成';
       const threadTail = threadNote ? `${threadNote}。每视频最多补 ${HISTORY_THREAD_OPEN_MAX} 条楼的第一页。` : '';
       const fillNote = `${filledRows ? `补全了 ${filledRows} 条原来更短的正文。` : ''}${filledMeta ? `补上了 ${filledMeta} 条缺失的楼层或时间。` : ''}${rootClash ? `有 ${rootClash} 条的楼层和后一次不一致，仍用先看到的。` : ''}${placeClash ? `有 ${placeClash} 条的 oid 或类型和后一次不一致，删除仍用先看到的。` : ''}${filledSrc ? `补上了 ${filledSrc} 条原来没有的来源。` : ''}${srcClash ? `有 ${srcClash} 条的来源和后一次不一致，仍用先看到的。` : ''}`;
       const histSum = `${histHead}：这次 +${added}，列表共 ${comments.length} 条。每视频最近 ${scanPages} 页，最多 ${HISTORY_VIDEO_CAP} 个视频。用时 ${fmtDur(Date.now() - t0)}。${fillNote}${hist.historyStop || ''}${videoNote}${moreNote}${threadTail}${aborted ? '后面的视频没有继续。' : ''}${digestLine()}`;
@@ -2152,7 +2152,7 @@
     const r = importAny(raw);
     renderList();
     if (r.ok) document.getElementById(`${P}-ta`).value = '';
-    setStatus(r.ok ? `✅ ${r.msg}。输入框已清空，避免再导入同一份。${digestLine()}` : `❌ ${r.msg}`);
+    setStatus(r.ok ? `${r.warn ? '⚠️' : '✅'} ${r.msg}。输入框已清空，避免再导入同一份。${digestLine()}` : `❌ ${r.msg}`);
     log(r.ok ? `导入: ${r.msg}` : `导入失败: ${r.msg}`, !r.ok ? 'err' : r.warn ? 'warn' : 'ok');
   }
 
