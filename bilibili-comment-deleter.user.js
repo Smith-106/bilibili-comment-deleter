@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.112
+// @version      2.2.113
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.112';
+  const VERSION = '2.2.113';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -976,18 +976,19 @@
         `https://api.bilibili.com/x/v2/reply/detail?type=${c.type}&oid=${c.oid}&root=${root}&rpid=${c.rpid}`,
         { retries: 1 }
       );
-    } catch (e) { return null; }
-    if (!d || typeof d.code !== 'number') return null;
+    } catch (e) { return { soft: true, why: `单条回查失败：${e.message || '网络错误'}` }; }
+    if (!d || typeof d.code !== 'number') return { soft: true, why: '单条回查没有返回 code' };
     if (d.code === -101 || d.code === -111) return { state: 'auth', why: ERR_TEXT[String(d.code)] || `code=${d.code}` };
     if (d.code === 12006 || d.code === -404) return { state: 'ok', why: `官方单条确认不存在(${d.code})` };
     if (d.code === 0) return { state: 'fail', why: '官方单条仍可见（删除接口可能假成功）' };
-    return null;
+    return { soft: true, why: `单条回查 code=${d.code}` };
   }
 
   /** 可判定回查：{state:'ok'|'fail'|'uncertain', why}；接口不可用返回 null（按待确认处理） */
   async function recheckDefinitive(c) {
     const quick = await oracleCheck(c);
-    if (quick) return quick;
+    if (quick && !quick.soft) return quick;
+    const withSoft = (why) => (quick && quick.soft && quick.why ? `${why}。${quick.why}` : why);
     const area = await walkArea(c.oid, c.type);
     if (area.auth) return { state: 'auth', why: area.auth };
     if (area.map.has(String(c.rpid))) {
@@ -995,15 +996,15 @@
     }
     if (c.root) {
       if (!area.complete && !area.map.has(String(c.root))) {
-        return { state: 'uncertain', why: '区域未翻完，不能凭根楼缺失判断子评已删' };
+        return { state: 'uncertain', why: withSoft('区域未翻完，不能凭根楼缺失判断子评已删') };
       }
       if (!area.map.has(String(c.root))) return { state: 'ok', why: '根楼层已不存在，子评必然已删' };
       const th = await walkThread(c.oid, c.type, c.root);
       if (th.set.has(String(c.rpid))) return { state: 'fail', why: '楼内仍在' };
-      if (!th.complete) return { state: 'uncertain', why: `楼内翻页未走完(≤${RECHECK_SUB_MAX}页)` };
+      if (!th.complete) return { state: 'uncertain', why: withSoft(`楼内翻页未走完(≤${RECHECK_SUB_MAX}页)`) };
       return { state: 'ok', why: `整楼未发现(根=${c.root})` };
     }
-    if (!area.complete) return { state: 'uncertain', why: `区域翻页未走完(≤${RECHECK_TOP_MAX}页)` };
+    if (!area.complete) return { state: 'uncertain', why: withSoft(`区域翻页未走完(≤${RECHECK_TOP_MAX}页)`) };
     return { state: 'ok', why: `全区未发现(${area.pages}页)` };
   }
 
@@ -2348,7 +2349,7 @@
         try {
           startBeat(() => `②回查 ${i + 1}/${pending.length} · ${snippet} · 请求中 · 已确认 ${ok} · 已用 ${fmtDur(Date.now() - t0)} · 剩余 ${fmtEta((pending.length - i) * 600)}`);
           v = await recheckDefinitive(c);
-        } catch (e) { v = null; }
+        } catch (e) { v = { state: 'uncertain', why: e.message || '回查失败' }; }
         finally { stopBeat(); }
         if (v && v.state === 'auth') {
           aborted = true;
