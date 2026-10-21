@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.159
+// @version      2.2.160
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.159';
+  const VERSION = '2.2.160';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -110,13 +110,19 @@
     if (h < 48) return `${h} 小时`;
     return `${Math.round(h / 24)} 天`;
   }
+  function takeChars(s, n, ellipsis) {
+    const chars = [...String(s ?? '')];
+    if (chars.length <= n) return chars.join('');
+    if (!ellipsis) return chars.slice(0, n).join('');
+    return `${chars.slice(0, Math.max(0, n - 1)).join('')}…`;
+  }
   function saveLastRun(text) {
     try {
       const full = String(text);
-      const cut = full.length > 400;
+      const cut = [...full].length > 400;
       localStorage.setItem(`${P}_lastrun`, JSON.stringify({
         t: Date.now(),
-        text: cut ? `${full.slice(0, 399)}…` : full,
+        text: cut ? takeChars(full, 400, true) : full,
         cut,
       }));
     } catch (e) { /* 存不下就只留在这一页 */ }
@@ -324,7 +330,7 @@
 
   function clipWhy(s) {
     const t = String(s || '').replace(/\s+/g, ' ').trim();
-    return t.length > 160 ? `${t.slice(0, 159)}…` : t;
+    return takeChars(t, 160, true);
   }
   function journalWhy(rpid) {
     if (!journalWhyCache) {
@@ -2641,7 +2647,7 @@
     const recheckOn = document.getElementById(`${P}-recheck`).checked;
     const delay = readDelay();
     const per = delay + (recheckOn ? 600 : 0);
-    const sample = String(targets[0].message || '(空评论)').replace(/\s+/g, ' ').slice(0, 36);
+    const sample = takeChars(String(targets[0].message || '(空评论)').replace(/\s+/g, ' '), 36, false);
     const skipNote = skippedOk ? `\n已跳过 ${skippedOk} 条已确认删除。` : '';
     const clashN = targets.filter(hasClash).length;
     const clashNote = clashN ? `\n其中 ${clashN} 条位置、楼层或来源和后一次不一致，删除仍用先看到的。${onlyClash ? '' : '\n可先勾选「只看冲突」核对。'}` : '';
@@ -2675,7 +2681,7 @@
       markActive(c.rpid);
       setProg(i + 1, targets.length, '①删除');
       const leftDel = (targets.length - i) * delay + (recheckOn ? targets.length * 600 : 0);
-      const snippet = String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22);
+      const snippet = takeChars(String(c.message || '(空)').replace(/\s+/g, ' '), 22, false);
 
       let result = null;          // 'ok' | 'uncertain' | 'fail'
       let whyNote = '';
@@ -2771,7 +2777,7 @@
         const c = pending[i];
         markActive(c.rpid);
         setProg(i + 1, pending.length, '②回查');
-        const snippet = String(c.message || '(空)').replace(/\s+/g, ' ').slice(0, 22);
+        const snippet = takeChars(String(c.message || '(空)').replace(/\s+/g, ' '), 22, false);
         let v = null;
         try {
           startBeat(() => `②回查 ${i + 1}/${pending.length} · ${snippet} · 请求中 · 已确认 ${ok} · 已用 ${fmtDur(Date.now() - t0)} · 剩余 ${fmtEta((pending.length - i) * 600)}`);
