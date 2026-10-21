@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.22
+// @version      2.2.23
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.22';
+  const VERSION = '2.2.23';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -691,8 +691,9 @@
     a.href = url; a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 3000);
-    setStatus(`已导出 ${list.length} 条（${kind.toUpperCase()}，含处理结果列）。`);
-    log(`已导出 ${list.length} 条（${kind.toUpperCase()}）`, 'ok');
+    const scope = filtersOn() ? `当前筛选 ${list.length}/${comments.length}` : String(list.length);
+    setStatus(`已导出 ${scope} 条（${kind.toUpperCase()}，含处理结果列）。`);
+    log(`已导出 ${scope} 条（${kind.toUpperCase()}）`, 'ok');
   }
 
   /* ═══════════ 样式（明暗双主题，CSS 变量） ═══════════ */
@@ -1155,6 +1156,31 @@
     return !!(filterKw || filtSrc !== 'all' || filtType !== 'all' || filtState !== 'all');
   }
 
+  function filterBits() {
+    const stateName = { ok: '已删除', fail: '未生效', uncertain: '待确认', none: '未处理', bad: '未成功' };
+    const bits = [];
+    if (filterKw) bits.push(`关键词「${filterKw}」`);
+    if (filtSrc !== 'all') bits.push(`来源 ${SRC_TEXT[filtSrc] || filtSrc}`);
+    if (filtType !== 'all') bits.push(`类型 ${typeText(filtType)}`);
+    if (filtState !== 'all') bits.push(`结果 ${stateName[filtState] || filtState}`);
+    return bits;
+  }
+
+  function clearFilters() {
+    filterKw = '';
+    filtSrc = 'all';
+    filtType = 'all';
+    filtState = 'all';
+    const kw = document.getElementById(`${P}-kw`);
+    if (kw) kw.value = '';
+    for (const [id, val] of [[`${P}-srcsel`, 'all'], [`${P}-typesel`, 'all'], [`${P}-statesel`, 'all']]) {
+      const el = document.getElementById(id);
+      if (el) el.value = val;
+    }
+    renderList();
+    setStatus('筛选已清除。');
+  }
+
   function visibleComments() {
     let list = comments;
     if (filterKw) list = list.filter((c) => (c.message || '').toLowerCase().includes(filterKw.toLowerCase()));
@@ -1267,8 +1293,15 @@
     if (!viewSnap.length) {
       const d = document.createElement('div');
       d.className = `${P}-empty`;
-      d.textContent = comments.length && (filterKw || filtSrc !== 'all' || filtType !== 'all' || filtState !== 'all')
-        ? '当前筛选无匹配。' : '暂无评论数据。';
+      if (comments.length && filtersOn()) {
+        d.textContent = `当前筛选无匹配：${filterBits().join('、')}。`;
+        const b = document.createElement('button');
+        b.className = `${P}-btn`;
+        b.textContent = '清除筛选';
+        b.style.marginTop = '8px';
+        b.onclick = clearFilters;
+        d.appendChild(b);
+      } else d.textContent = '暂无评论数据。';
       listEl.appendChild(d);
       updCount();
       return;
