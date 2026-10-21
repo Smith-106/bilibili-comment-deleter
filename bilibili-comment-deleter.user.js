@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.9
+// @version      2.2.10
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.9';
+  const VERSION = '2.2.10';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -700,6 +700,9 @@
       .${P}-log-line{padding:2px 0;word-break:break-all}
       .${P}-log-hide{display:none}
       .${P}-logbar{display:flex;justify-content:flex-end;padding:2px 14px 0}
+      .${P}-ask{position:absolute;inset:0;z-index:6;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px}
+      .${P}-askbox{width:100%;background:var(--c-bg);color:var(--c-tx);border:1px solid var(--c-inputbd);border-radius:10px;padding:14px;white-space:pre-wrap;font-size:13px;line-height:1.45}
+      .${P}-askbox .${P}-row{margin-top:12px;justify-content:flex-end}
       .${P}-ok{color:#2ed573} .${P}-err{color:#ff4757} .${P}-warn{color:#ffa502} .${P}-info{color:#70a1ff}
     `;
     document.head.appendChild(s);
@@ -793,6 +796,15 @@
       <div class="${P}-status" id="${P}-status"></div>
       <div class="${P}-logbar"><button type="button" class="${P}-btn" id="${P}-logbad" style="padding:2px 8px">只看问题</button></div>
       <div class="${P}-log" id="${P}-log"></div>
+      <div class="${P}-ask" id="${P}-ask" style="display:none" role="dialog" aria-modal="true">
+        <div class="${P}-askbox">
+          <div id="${P}-askmsg"></div>
+          <div class="${P}-row">
+            <button type="button" class="${P}-btn" id="${P}-askno">取消</button>
+            <button type="button" class="${P}-btn ${P}-btn-d" id="${P}-askok">确认</button>
+          </div>
+        </div>
+      </div>
     `;
     document.body.appendChild(panel);
 
@@ -848,8 +860,8 @@
     $el(`${P}-selnone`).onclick = () => { selected.clear(); renderList(); updCount(); };
     $el(`${P}-expj`).onclick = () => doExport('json');
     $el(`${P}-expc`).onclick = () => doExport('csv');
-    $el(`${P}-reset`).onclick = () => {
-      if (!confirm('清空当前列表与勾选？（已删除记录不受影响）')) return;
+    $el(`${P}-reset`).onclick = async () => {
+      if (!(await ask('清空当前列表与勾选？\n已删除记录不受影响。', '清空'))) return;
       resetDataset();
       setStatus('列表已清空。');
       log('🧹 列表已清空', 'warn');
@@ -1265,14 +1277,14 @@
     // 换号防护：列表枚举账号与当前登录账号不一致时，明确提醒
     const curUid = getCookie('DedeUserID');
     if (datasetUid && curUid && datasetUid !== curUid) {
-      if (!confirm(`⚠️ 列表来自 UID=${datasetUid}，当前登录 UID=${curUid}。\n删除接口只会作用于当前登录账号名下的评论（他人评论不会被删）。\n继续执行 ${targets.length} 条删除？`)) return;
+      if (!(await ask(`列表来自 UID=${datasetUid}，当前登录 UID=${curUid}。\n删除只会作用于当前登录账号自己的评论。\n继续这 ${targets.length} 条？`, '继续'))) return;
     }
     const recheckOn = document.getElementById(`${P}-recheck`).checked;
     const delay = Math.max(200, parseInt(document.getElementById(`${P}-delay`).value, 10) || DELAY_DEFAULT);
     const per = delay + (recheckOn ? 600 : 0);
     const sample = String(targets[0].message || '(空评论)').replace(/\s+/g, ' ').slice(0, 36);
     const skipNote = skippedOk ? `\n已跳过 ${skippedOk} 条已确认删除。` : '';
-    if (!confirm(`即将删除 ${targets.length} 条（${scope}）。\n间隔 ${delay}ms，回查${recheckOn ? '开' : '关'}，预计 ${fmtEta(targets.length * per)}。${skipNote}\n首条：${sample}\n\n不可撤销。确认删除？`)) return;
+    if (!(await ask(`即将删除 ${targets.length} 条（${scope}）。\n间隔 ${delay}ms，回查${recheckOn ? '开' : '关'}，预计 ${fmtEta(targets.length * per)}。${skipNote}\n首条：${sample}\n\n不可撤销。`, '删除'))) return;
 
     deleting = true; aborted = false;
     batchResults = new Map();
@@ -1428,6 +1440,36 @@
     if (stick) el.scrollTop = el.scrollHeight;
   }
   function setStatus(t) { const el = document.getElementById(`${P}-status`); if (el) el.textContent = t; }
+
+  function ask(text, okLabel) {
+    return new Promise((resolve) => {
+      const mask = document.getElementById(`${P}-ask`);
+      const msg = document.getElementById(`${P}-askmsg`);
+      const ok = document.getElementById(`${P}-askok`);
+      const no = document.getElementById(`${P}-askno`);
+      if (!mask || !msg || !ok || !no) { resolve(false); return; }
+      msg.textContent = text;
+      ok.textContent = okLabel || '确认';
+      mask.style.display = 'flex';
+      const done = (v) => {
+        mask.style.display = 'none';
+        ok.onclick = null;
+        no.onclick = null;
+        document.removeEventListener('keydown', onKey, true);
+        resolve(v);
+      };
+      const onKey = (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        done(false);
+      };
+      ok.onclick = () => done(true);
+      no.onclick = () => done(false);
+      document.addEventListener('keydown', onKey, true);
+      no.focus();
+    });
+  }
   function touchList(force) {
     const now = Date.now();
     if (!force && now - lastListPaint < 800) return;
