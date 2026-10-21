@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.150
+// @version      2.2.151
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.150';
+  const VERSION = '2.2.151';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -454,6 +454,15 @@
     if (nxt && nxt !== '0' && nxt !== String(prev.next)) return { offset: '', next: nxt };
     return null;
   }
+  function historyCursorNext(maxRaw, viewRaw, prevMax, prevView) {
+    const maxId = cursorId(maxRaw);
+    const view = cursorId(viewRaw);
+    if (!maxId || maxId === '0' || !view || view === '0') return { stop: '' };
+    if (String(maxId) === String(prevMax) && String(view) === String(prevView)) {
+      return { stop: '历史翻页游标没有前进，更早的视频没翻到。' };
+    }
+    return { max: maxId, view };
+  }
   function replyMainUrl(type, oid, next, offset) {
     const base = `https://api.bilibili.com/x/v2/reply/main?type=${type}&oid=${oid}&mode=2`;
     if (offset) return `${base}&pagination_str=${encodeURIComponent(JSON.stringify({ offset }))}`;
@@ -746,10 +755,15 @@
         aids.push(idExact(raw));
       }
       const c = (data.data && data.data.cursor) || {};
-      const maxId = cursorId(c.max);
-      const view = cursorId(c.view_at);
-      if (!maxId || !view) break;
-      cursorMax = maxId; viewAt = view;
+      const step = historyCursorNext(c.max, c.view_at, cursorMax, viewAt);
+      if (!step.max) {
+        if (step.stop) {
+          historyStop = step.stop;
+          log(historyStop, 'warn');
+        }
+        break;
+      }
+      cursorMax = step.max; viewAt = step.view;
       await sleep(800);
     }
     if (!historyStop && !aborted && seenAids.size < HISTORY_VIDEO_CAP && guard >= 400) {
