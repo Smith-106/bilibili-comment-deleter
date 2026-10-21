@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.3
+// @version      2.2.4
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.3';
+  const VERSION = '2.2.4';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -55,6 +55,7 @@
   let filterKw = '';                  // 关键词
   let filtSrc = 'all';
   let filtType = 'all';
+  let filtState = 'all';          // all | ok | fail | uncertain | none
   let sortMode = 'default';           // default | tasc | tdesc
   let fetching = false;
   let deleting = false;
@@ -212,7 +213,9 @@
     selected.clear();
     datasetUid = '';
     batchResults = null;
-    filterKw = ''; filtSrc = 'all'; filtType = 'all'; sortMode = 'default';
+    filterKw = ''; filtSrc = 'all'; filtType = 'all'; filtState = 'all'; sortMode = 'default';
+    const stSel = document.getElementById(`${P}-statesel`);
+    if (stSel) stSel.value = 'all';
     const rb = document.getElementById(`${P}-retry`);
     if (rb) rb.style.display = 'none';
     renderList(); updCount();
@@ -722,7 +725,12 @@
             <option value="all">全部</option><option value="1">视频</option><option value="11">番剧</option>
             <option value="12">专栏</option><option value="17">动态</option><option value="21">直播</option>
           </select></label>
-          <label>排序 <select class="${P}-sel" id="${P}-sortsel">
+          <label>结果 <select class="${P}-sel" id="${P}-statesel" title="按处理结果筛选">
+             <option value="all">全部</option><option value="ok">已删除</option>
+             <option value="fail">未生效</option><option value="uncertain">待确认</option>
+             <option value="none">未处理</option>
+           </select></label>
+           <label>排序 <select class="${P}-sel" id="${P}-sortsel">
             <option value="default">默认</option><option value="tasc">时间↑</option><option value="tdesc">时间↓</option>
           </select></label>
           <button class="${P}-btn" id="${P}-selall" style="padding:4px 10px">全选</button>
@@ -751,7 +759,12 @@
       panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
     };
     $el(`${P}-close`).onclick = () => { panel.style.display = 'none'; };
-    $el(`${P}-stop`).onclick = () => { aborted = true; log('正在停止…（当前请求结束后退出）', 'warn'); };
+    $el(`${P}-stop`).onclick = () => {
+      aborted = true;
+      $el(`${P}-stop`).disabled = true;
+      setStatus('正在停止，等当前这一次请求结束…');
+      log('正在停止…（当前请求结束后退出）', 'warn');
+    };
     $el(`${P}-theme`).onclick = () => {
       const t = panel.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
       panel.setAttribute('data-theme', t);
@@ -769,6 +782,11 @@
     $el(`${P}-kw`).addEventListener('keydown', (e) => { if (e.key === 'Enter') onFilter(); });
     $el(`${P}-srcsel`).onchange = () => { filtSrc = $el(`${P}-srcsel`).value; renderList(); updCount(); };
     $el(`${P}-typesel`).onchange = () => { filtType = $el(`${P}-typesel`).value; renderList(); updCount(); };
+    $el(`${P}-statesel`).onchange = () => { filtState = $el(`${P}-statesel`).value; renderList(); updCount(); };
+    $el(`${P}-kw`).addEventListener('input', () => {
+      clearTimeout(kwTimer);
+      kwTimer = setTimeout(() => onFilter(true), 250);
+    });
     $el(`${P}-sortsel`).onchange = () => { sortMode = $el(`${P}-sortsel`).value; renderList(); updCount(); };
     $el(`${P}-selall`).onclick = () => {
       visibleComments().forEach((c) => { if (c.oid && c.type) selected.add(c.rpid); });
@@ -878,6 +896,13 @@
     if (filterKw) list = list.filter((c) => (c.message || '').toLowerCase().includes(filterKw.toLowerCase()));
     if (filtSrc !== 'all') list = list.filter((c) => c.src === filtSrc);
     if (filtType !== 'all') list = list.filter((c) => String(c.type) === filtType);
+    if (filtState !== 'all') {
+      const jm = journalMap();
+      list = list.filter((c) => {
+        const st = jm.get(c.rpid);
+        return filtState === 'none' ? !st : st === filtState;
+      });
+    }
     if (sortMode === 'tasc') list = [...list].sort((a, b) => (a.ctime || 0) - (b.ctime || 0));
     else if (sortMode === 'tdesc') list = [...list].sort((a, b) => (b.ctime || 0) - (a.ctime || 0));
     return list;
@@ -886,6 +911,7 @@
   let viewSnap = [];      // 当前渲染快照
   let viewOffset = 0;     // 已渲染条数
   let ro = null;          // IntersectionObserver
+  let kwTimer = null;
 
   function buildRow(c) {
     const row = document.createElement('div');
@@ -970,7 +996,7 @@
     if (!viewSnap.length) {
       const d = document.createElement('div');
       d.className = `${P}-empty`;
-      d.textContent = comments.length && (filterKw || filtSrc !== 'all' || filtType !== 'all')
+      d.textContent = comments.length && (filterKw || filtSrc !== 'all' || filtType !== 'all' || filtState !== 'all')
         ? '当前筛选无匹配。' : '暂无评论数据。';
       listEl.appendChild(d);
       updCount();
@@ -994,17 +1020,38 @@
   }
 
   function updCount() {
-    const vis = visibleComments().filter((c) => c.oid && c.type);
-    const nSel = visibleComments().filter((c) => selected.has(c.rpid)).length;
-    document.getElementById(`${P}-dsel`).disabled = !vis.length || deleting || fetching;
-    document.getElementById(`${P}-dall`).disabled = !vis.length || deleting || fetching;
-    document.getElementById(`${P}-cnt`).textContent = `${nSel}/${vis.length} 条`;
+    const shown = visibleComments();
+    const vis = shown.filter((c) => c.oid && c.type);
+    const nSel = shown.filter((c) => selected.has(c.rpid)).length;
+    const jm = journalMap();
+    let okN = 0, failN = 0, uncN = 0;
+    for (const c of vis) {
+      const st = jm.get(c.rpid);
+      if (st === 'ok') okN++;
+      else if (st === 'fail') failN++;
+      else if (st === 'uncertain') uncN++;
+    }
+    const dsel = document.getElementById(`${P}-dsel`);
+    const dall = document.getElementById(`${P}-dall`);
+    if (dsel) dsel.disabled = !vis.length || deleting || fetching;
+    if (dall) dall.disabled = !vis.length || deleting || fetching;
+    const cnt = document.getElementById(`${P}-cnt`);
+    if (cnt) cnt.textContent = `${nSel}/${vis.length} · 已删${okN} 失败${failN} 待确认${uncN}`;
   }
 
-  function onFilter() {
-    filterKw = document.getElementById(`${P}-kw`).value.trim();
+  function onFilter(live) {
+    const next = document.getElementById(`${P}-kw`).value.trim();
+    if (live && next === filterKw) return;
+    filterKw = next;
     renderList();
-    setStatus(filterKw ? `已按「${filterKw}」筛选。` : '已清除关键词。');
+    if (!live) setStatus(filterKw ? `已按「${filterKw}」筛选。` : '已清除关键词。');
+  }
+
+  function armStop(on) {
+    const el = document.getElementById(`${P}-stop`);
+    if (!el) return;
+    el.style.display = on ? 'inline-block' : 'none';
+    el.disabled = !on;
   }
 
   /* ═══════════ 控制器：枚举 ═══════════ */
@@ -1020,7 +1067,7 @@
     const btn = document.getElementById(`${P}-load`);
     btn.disabled = true; fetching = true; aborted = false;
     document.getElementById(`${P}-hist`).disabled = true;
-    document.getElementById(`${P}-stop`).style.display = 'inline-block';
+    armStop(true);
     setStatus('AICU 枚举中…（每页 500 条，间隔 3s 防风控）');
     showProg(true);
     try {
@@ -1036,7 +1083,7 @@
     } finally {
       btn.disabled = false; fetching = false;
       document.getElementById(`${P}-hist`).disabled = false;
-      document.getElementById(`${P}-stop`).style.display = 'none';
+      armStop(false);
       showProg(false);
       updCount();
     }
@@ -1048,7 +1095,7 @@
     const btn = document.getElementById(`${P}-hist`);
     btn.disabled = true; fetching = true; aborted = false;
     document.getElementById(`${P}-load`).disabled = true;
-    document.getElementById(`${P}-stop`).style.display = 'inline-block';
+    armStop(true);
     setStatus('官方历史扫描：翻历史 → 逐视频扫评论（仅视频，aicu 的兜底）…');
     showProg(true);
     try {
@@ -1066,7 +1113,7 @@
     } finally {
       btn.disabled = false; fetching = false;
       document.getElementById(`${P}-load`).disabled = false;
-      document.getElementById(`${P}-stop`).style.display = 'none';
+      armStop(false);
       showProg(false);
       updCount();
     }
@@ -1121,6 +1168,7 @@
     const delay = Math.max(200, parseInt(document.getElementById(`${P}-delay`).value, 10) || DELAY_DEFAULT);
 
     lockWhileDeleting(true);
+    armStop(true);
     showProg(true);
     const t0 = Date.now();
     log(`🔥 开始删除 ${targets.length} 条（${scope}），间隔 ${delay}ms，回查${recheckOn ? '开' : '关'}`, 'warn');
@@ -1226,6 +1274,7 @@
     log(`==== ${sum} ====`, fail ? 'warn' : 'ok');
     deleting = false;
     lockWhileDeleting(false);
+    armStop(false);
     showProg(false);
     renderList(); updCount();
 
@@ -1243,9 +1292,10 @@
     const d = document.createElement('div');
     d.className = `${P}-log-line ${P}-${type || 'info'}`;
     d.textContent = `[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${msg}`;
+    const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
     el.appendChild(d);
     while (el.children.length > 300) el.removeChild(el.firstChild);
-    el.scrollTop = el.scrollHeight;
+    if (stick) el.scrollTop = el.scrollHeight;
   }
   function setStatus(t) { const el = document.getElementById(`${P}-status`); if (el) el.textContent = t; }
   function showProg(show) {
