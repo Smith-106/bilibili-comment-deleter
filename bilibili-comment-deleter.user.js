@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.49
+// @version      2.2.50
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.49';
+  const VERSION = '2.2.50';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -781,6 +781,14 @@
     } catch (e) { return null; }
   }
 
+  function jumpHint(c) {
+    if (c.type === 1) return '新标签打开视频页。BV 查不到时用 av 号。';
+    if (c.type === 17) return '新标签打开动态页。';
+    if (c.type === 12) return '新标签打开专栏页。';
+    if (c.type === 11) return '按 ep 号打开番剧。如果 404，说明这个 oid 不是分集号，不是删除失败。';
+    return `暂不支持 ${typeText(c.type)} 的跳转`;
+  }
+
   async function jumpTo(c) {
     if (!c.oid) { setStatus('该评论缺少 oid，无法跳转。'); return; }
     let url = null;
@@ -795,8 +803,10 @@
     } else if (c.type === 11) {
       url = `https://www.bilibili.com/bangumi/play/ep${c.oid}#reply${c.rpid}`;
     }
-    if (url) window.open(url, '_blank');
-    else setStatus(`暂不支持 ${typeText(c.type)} 的跳转（oid=${c.oid}）。`);
+    if (url) {
+      if (c.type === 11) setStatus(`按 ep${c.oid} 打开。如果 404，说明这个 oid 不是分集号。`);
+      window.open(url, '_blank');
+    } else setStatus(`暂不支持 ${typeText(c.type)} 的跳转（oid=${c.oid}）。`);
   }
 
   /* ═══════════ 导出备份 ═══════════ */
@@ -1526,7 +1536,7 @@
       const jb = document.createElement('button');
       jb.className = `${P}-jump`;
       jb.textContent = '↗';
-      jb.title = '新标签页打开评论所在页面';
+      jb.title = jumpHint(c);
       jb.dataset.act = 'jump';
       jb.dataset.rpid = String(c.rpid);
       row.appendChild(jb);
