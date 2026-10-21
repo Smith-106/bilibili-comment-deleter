@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.160
+// @version      2.2.161
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.160';
+  const VERSION = '2.2.161';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1254,13 +1254,21 @@
     return res;
   }
 
+  function replyCountText(text) {
+    const wan = String(text || '').match(/(\d+(?:\.\d+)?)\s*万/);
+    if (wan) {
+      const n = Math.round(Number(wan[1]) * 10000);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    }
+    const m = String(text || '').match(/(\d+)/);
+    return m ? Number(m[1]) : 0;
+  }
   function childReplyCount(top) {
     const n = Number(top && top.rcount);
     if (Number.isFinite(n) && n > 0) return n;
     const ctrl = (top && top.reply_control) || {};
     const text = `${ctrl.sub_reply_entry_text || ''} ${ctrl.sub_reply_title_text || ''}`;
-    const m = text.match(/(\d+)/);
-    return m ? Number(m[1]) : 0;
+    return replyCountText(text);
   }
   function threadPageDone(count, pn, pageSize, got) {
     const countKnown = typeof count === 'number' && count > 0;
