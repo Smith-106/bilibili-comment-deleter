@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.56
+// @version      2.2.57
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.56';
+  const VERSION = '2.2.57';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -344,6 +344,7 @@
     const rb = document.getElementById(`${P}-retry`);
     if (rb) rb.style.display = 'none';
     renderList(); updCount();
+    saveSettings();
   }
 
   /** aicu 条目、原始单页，或本工具自己导出的扁对象 → 规范对象 */
@@ -1158,7 +1159,13 @@
       clearTimeout(kwTimer);
       kwTimer = setTimeout(() => onFilter(true), 250);
     });
-    $el(`${P}-sortsel`).onchange = () => { sortMode = $el(`${P}-sortsel`).value; renderList(); updCount(); };
+    $el(`${P}-sortsel`).onchange = () => {
+      sortMode = $el(`${P}-sortsel`).value;
+      saveSettings();
+      renderList(); updCount();
+      const name = { default: '默认', tasc: '时间从早到晚', tdesc: '时间从晚到早' };
+      setStatus(`已按${name[sortMode] || '默认'}排序。换页之后还是这个顺序。`);
+    };
     $el(`${P}-selall`).onclick = () => {
       const outside = outsideSelected();
       let n = 0;
@@ -1178,7 +1185,7 @@
     $el(`${P}-reset`).onclick = async () => {
       if (!(await ask('清空当前列表与勾选？\n已删除记录不受影响。', '清空'))) return;
       resetDataset();
-      setStatus('列表已清空。');
+      setStatus('列表已清空。排序回到默认，换页之后也是默认。');
       log('🧹 列表已清空', 'warn');
     };
     $el(`${P}-forget`).onclick = async () => {
@@ -1331,6 +1338,11 @@
         panel.style.top = saved.top + 'px';
         panel.style.transform = 'none';
       }
+      if (saved.sort === 'default' || saved.sort === 'tasc' || saved.sort === 'tdesc') {
+        sortMode = saved.sort;
+        const sortEl = $el(`${P}-sortsel`);
+        if (sortEl) sortEl.value = saved.sort;
+      }
       if (saved.open === true) panel.style.display = 'flex';
     } catch (e) { /* noop */ }
     readDelay();
@@ -1374,6 +1386,7 @@
         skipOk: document.getElementById(`${P}-skipok`).checked,
         theme: panel && panel.getAttribute('data-theme') || 'dark',
         logOnlyBad,
+        sort: sortMode,
         open: !!(panel && panel.style.display !== 'none'),
         left: panel && panel.style.left ? parseInt(panel.style.left, 10) : 0,
         top: panel && panel.style.top ? parseInt(panel.style.top, 10) : 0,
