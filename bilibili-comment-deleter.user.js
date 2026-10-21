@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.79
+// @version      2.2.80
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.79';
+  const VERSION = '2.2.80';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1279,7 +1279,7 @@
     $el(`${P}-clashonly`).onchange = () => {
       onlyClash = $el(`${P}-clashonly`).checked;
       renderList(); updCount();
-      setStatus(onlyClash ? `只看冲突：当前 ${visibleComments().length} 条。` : '已取消只看冲突。');
+      say(onlyClash ? `只看冲突：当前 ${visibleComments().length} 条。` : '已取消只看冲突。');
     };
     $el(`${P}-kw`).addEventListener('input', () => {
       clearTimeout(kwTimer);
@@ -1586,7 +1586,7 @@
     onlyClash = false;
     syncFilterControls();
     renderList();
-    setStatus('筛选已清除。排序还在。');
+    say('筛选已清除。排序还在。');
   }
 
   function idHit(c, q) {
@@ -1881,7 +1881,7 @@
     filterKw = next;
     renderList();
     const short = filterKw && [...filterKw].length < 4;
-    setStatus(filterKw ? `已按「${filterKw}」筛选。${short ? '少于 4 个字只搜正文，不拿去对编号。' : '正文、rpid、oid。'}` : '已清除关键词。');
+    say(filterKw ? `已按「${filterKw}」筛选。${short ? '少于 4 个字只搜正文，不拿去对编号。' : '正文、rpid、oid。'}` : '已清除关键词。');
   }
 
   function armStop(on) {
@@ -2353,6 +2353,10 @@
     return n;
   }
   function setStatus(t) { const el = document.getElementById(`${P}-status`); if (el) el.textContent = t; }
+  function say(t) {
+    if (beatTimer) log(t, 'info');
+    else setStatus(t);
+  }
 
   function digestLine() {
     const by = new Map();
