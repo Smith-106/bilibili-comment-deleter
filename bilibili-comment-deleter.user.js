@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.92
+// @version      2.2.93
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.92';
+  const VERSION = '2.2.93';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -613,12 +613,13 @@
     for (let hi = 0; hi < aids.length; hi++) {
       if (aborted) break;
       const aid = aids[hi];
-      startBeat(() => `扫描视频 ${hi + 1}/${aids.length} · 这次 +${fresh()} · 列表 ${comments.length} 条 · 已用 ${spent()}${videoFail ? ` · 失败 ${videoFail}` : ''}`);
+      const pace = { thread: '' };
+      startBeat(() => `扫描视频 ${hi + 1}/${aids.length}${pace.thread ? ` · ${pace.thread}` : ''} · 这次 +${fresh()} · 列表 ${comments.length} 条 · 已用 ${spent()}${videoFail ? ` · 失败 ${videoFail}` : ''}`);
       touchList(false);
       setProg(hi, aids.length, '扫描');
       let videoNote = '';
       try {
-        const scan = await fetchOwnRepliesFromVideo(aid, mid, scanPages);
+        const scan = await fetchOwnRepliesFromVideo(aid, mid, scanPages, pace);
         if (scan && scan.capped) cappedVideos++;
         hiddenThreads += (scan && scan.hiddenThreads) || 0;
       }
@@ -659,21 +660,26 @@
       })) added++;
     }
     const count = Number(d.data && d.data.page && d.data.page.count);
-    return { more: (Number.isFinite(count) && count > rs.length) || rs.length >= HISTORY_THREAD_PS, added };
+    const more = Number.isFinite(count) ? count > rs.length : rs.length >= HISTORY_THREAD_PS;
+    return { more, added };
   }
 
-  async function fetchOwnRepliesFromVideo(aid, mid, scanPages) {
+  async function fetchOwnRepliesFromVideo(aid, mid, scanPages, pace) {
     let nextPage = 0;
     let guard = 0;
     let hiddenThreads = 0;
     let openedThreads = 0;
-    const done = (capped) => ({ capped, hiddenThreads });
+    const done = (capped) => {
+      if (pace) pace.thread = '';
+      return { capped, hiddenThreads };
+    };
     while (guard < scanPages) {
       guard++;
       if (aborted) return done(false);
       const d = await gmGetJSON(`https://api.bilibili.com/x/v2/reply/main?type=1&oid=${aid}&mode=2&next=${nextPage}`);
       if (d.code !== 0) throw new Error(`av${aid} 评论接口 code=${d.code}`);
       let added = 0;
+      let pageOpened = 0;
       const tops = (d.data && d.data.replies) || [];
       for (const top of tops) {
         const preview = Array.isArray(top.replies) ? top.replies : [];
@@ -703,6 +709,8 @@
           if (openedThreads >= HISTORY_THREAD_OPEN_MAX) hiddenThreads++;
           else {
             openedThreads++;
+            pageOpened++;
+            if (pace) pace.thread = `补楼 ${rootId}`;
             try {
               const extra = await pullOwnThreadPage(aid, rootId, mid);
               added += extra.added || 0;
@@ -716,7 +724,8 @@
           }
         }
       }
-      log(`  aid=${aid} 第${guard}页 +${added}`, 'info');
+      if (pace) pace.thread = '';
+      log(`  aid=${aid} 第${guard}页 +${added}${pageOpened ? `，补楼 ${pageOpened}` : ''}`, 'info');
       const c = (d.data && d.data.cursor) || {};
       if (c.is_end) return done(false);
       if (typeof c.next !== 'number' || c.next === nextPage) return done(false);
