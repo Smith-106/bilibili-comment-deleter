@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.78
+// @version      2.2.79
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.78';
+  const VERSION = '2.2.79';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -329,18 +329,25 @@
   let filledMeta = 0;
   let rootClash = 0;
   let placeClash = 0;
+  let filledSrc = 0;
+  let srcClash = 0;
   let restoredMarks = 0;
   function resetFillStats() {
     filledRows = 0;
     filledMeta = 0;
     rootClash = 0;
     placeClash = 0;
+    filledSrc = 0;
+    srcClash = 0;
     restoredMarks = 0;
   }
   function flagOn(v) {
     if (v === true || v === 1) return true;
     const s = String(v == null ? '' : v).trim().toLowerCase();
     return s === '1' || s === 'true' || s === 'yes' || s === '是';
+  }
+  function hasClash(c) {
+    return !!(c && (c.placeClash || c.rootConflict || c.srcConflict));
   }
   function addIfAbsent(item) {
     if (!item || !item.rpid || !item.oid || !item.type) return false;
@@ -369,6 +376,13 @@
       let marked = false;
       if (item.placeClash && !cur.placeClash) { cur.placeClash = true; marked = true; }
       if (item.rootConflict && !cur.rootConflict) { cur.rootConflict = true; marked = true; }
+      const realSrc = (s) => !!(s && s !== 'import');
+      if (!realSrc(cur.src) && realSrc(item.src)) { cur.src = item.src; filledSrc++; }
+      else if (realSrc(cur.src) && realSrc(item.src) && cur.src !== item.src && !cur.srcConflict) {
+        cur.srcConflict = true;
+        srcClash++;
+      }
+      if (item.srcConflict && !cur.srcConflict) { cur.srcConflict = true; marked = true; }
       if (marked) restoredMarks++;
       const nextOid = Number(item.oid) || 0;
       const nextType = Number(item.type) || 0;
@@ -420,6 +434,7 @@
       cut: clip.cut || flagOn(it && it.cut),
       placeClash: flagOn(it && it.placeClash),
       rootConflict: flagOn(it && it.rootConflict),
+      srcConflict: flagOn(it && it.srcConflict),
       ctime: Number((it && (it.time || it.ctime)) || 0) || 0,
       root: parent.rootid ? Number(parent.rootid) : (Number(it && it.root) || 0),
       src: 'aicu',
@@ -689,7 +704,7 @@
     const extra = restored ? `，补回处理记录 ${restored}` : '';
     const partial = !Array.isArray(data) && data.exported != null && data.total != null && Number(data.exported) < Number(data.total);
     const scopeNote = partial ? `。这是筛选导出（${data.exported}/${data.total}），不是当时的全部` : '';
-    const fillNote = `${filledRows ? `，补全更短正文 ${filledRows}` : ''}${filledMeta ? `，补上楼层或时间 ${filledMeta}` : ''}${rootClash ? `，${rootClash} 条楼层和后一次不一致，仍用先看到的` : ''}${placeClash ? `，${placeClash} 条的 oid 或类型和后一次不一致，删除仍用先看到的` : ''}${restoredMarks ? `，恢复冲突标记 ${restoredMarks}` : ''}`;
+    const fillNote = `${filledRows ? `，补全更短正文 ${filledRows}` : ''}${filledMeta ? `，补上楼层或时间 ${filledMeta}` : ''}${rootClash ? `，${rootClash} 条楼层和后一次不一致，仍用先看到的` : ''}${placeClash ? `，${placeClash} 条的 oid 或类型和后一次不一致，删除仍用先看到的` : ''}${restoredMarks ? `，恢复冲突标记 ${restoredMarks}` : ''}${filledSrc ? `，补上来源 ${filledSrc}` : ''}${srcClash ? `，${srcClash} 条来源和后一次不一致，仍用先看到的` : ''}`;
     const srcNote = keptSrc ? `，沿用原来源 ${keptSrc}` : '';
     return { ok: true, msg: `导入完成：新增 ${added}，重复 ${dup}，无效 ${invalid}${fillNote}${srcNote}${extra}${scopeNote}` };
   }
@@ -739,6 +754,7 @@
       cut: col(cols, 'cut'),
       placeClash: col(cols, 'placeClash'),
       rootConflict: col(cols, 'rootConflict'),
+      srcConflict: col(cols, 'srcConflict'),
     }));
     return importJson(JSON.stringify(replies));
   }
@@ -975,9 +991,9 @@
       blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
       name = `bili-comments${tag}-${Date.now()}.json`;
     } else {
-      const head = 'rpid,oid,type,typeText,message,ctime,ctimeText,root,src,state,cut,placeClash,rootConflict';
+      const head = 'rpid,oid,type,typeText,message,ctime,ctimeText,root,src,state,cut,placeClash,rootConflict,srcConflict';
       const rows = stamped.map((c) =>
-        [c.rpid, c.oid, c.type, typeText(c.type), c.message, c.ctime, fmtTime(c.ctime), c.root, SRC_TEXT[c.src] || c.src, c.state, c.cut ? 1 : 0, c.placeClash ? 1 : 0, c.rootConflict ? 1 : 0].map(csvCell).join(',')
+        [c.rpid, c.oid, c.type, typeText(c.type), c.message, c.ctime, fmtTime(c.ctime), c.root, SRC_TEXT[c.src] || c.src, c.state, c.cut ? 1 : 0, c.placeClash ? 1 : 0, c.rootConflict ? 1 : 0, c.srcConflict ? 1 : 0].map(csvCell).join(',')
       ).join('\r\n');
       blob = new Blob(['\ufeff' + head + '\r\n' + rows], { type: 'text/csv;charset=utf-8' });
       name = `bili-comments${tag}-${Date.now()}.csv`;
@@ -1174,7 +1190,7 @@
            <label>排序 <select class="${P}-sel" id="${P}-sortsel">
             <option value="default">默认</option><option value="tasc">时间↑</option><option value="tdesc">时间↓</option>
           </select></label>
-          <label title="只显示 oid、类型或楼层和后一次不一致的"><input type="checkbox" id="${P}-clashonly"> 只看冲突</label>
+          <label title="只显示位置、楼层或来源和后一次不一致的"><input type="checkbox" id="${P}-clashonly"> 只看冲突</label>
           <button class="${P}-btn" id="${P}-selall" style="padding:4px 10px" title="勾选当前筛选。按住 Shift 再点两行，会连选中间">全选</button>
           <button class="${P}-btn" id="${P}-selnone" style="padding:4px 10px" title="去掉全部勾选，包括当前筛选外面的">全不选</button>
           <button class="${P}-btn" id="${P}-expj" title="导出当前筛选下列表为 JSON（删除前备份）">💾JSON</button>
@@ -1602,7 +1618,7 @@
         return st === filtState;
       });
     }
-    if (onlyClash) list = list.filter((c) => c.placeClash || c.rootConflict);
+    if (onlyClash) list = list.filter(hasClash);
     if (sortMode === 'tasc') list = [...list].sort((a, b) => (a.ctime || 0) - (b.ctime || 0));
     else if (sortMode === 'tdesc') list = [...list].sort((a, b) => (b.ctime || 0) - (a.ctime || 0));
     return list;
@@ -1682,6 +1698,13 @@
       clash.className = `${P}-mark`;
       clash.textContent = ' ·楼层有冲突';
       clash.title = '后来的根楼层不一样。回查和删除仍用先看到的。';
+      meta.appendChild(clash);
+    }
+    if (c.srcConflict) {
+      const clash = document.createElement('span');
+      clash.className = `${P}-mark`;
+      clash.textContent = ' ·来源有冲突';
+      clash.title = '后来的来源不一样。仍用先看到的。';
       meta.appendChild(clash);
     }
     if (filterKw) {
@@ -1843,11 +1866,11 @@
         for (const id of selected) if (!visIds.has(id)) outside++;
       }
       let clashAll = 0;
-      for (const c of comments) if (c.placeClash || c.rootConflict) clashAll++;
+      for (const c of comments) if (hasClash(c)) clashAll++;
       cnt.textContent = `${nSel}/${vis.length} · 已删${okN} 失败${failN} 待确认${uncN}${outside ? ` · 筛选外已勾${outside}` : ''}${clashAll ? ` · 冲突${clashAll}` : ''}`;
       const tips = [];
       if (outside) tips.push('这些勾选不在当前筛选里。删除选中不会动它们。清除筛选后会重新出现。');
-      if (clashAll) tips.push(`整份列表里有 ${clashAll} 条位置或楼层冲突。勾选「只看冲突」可以单独看。`);
+      if (clashAll) tips.push(`整份列表里有 ${clashAll} 条位置、楼层或来源冲突。勾选「只看冲突」可以单独看。`);
       cnt.title = tips.join('');
     }
   }
@@ -1894,7 +1917,7 @@
       const aicuHead = aborted ? '已停止枚举' : aicu.stopReason ? 'AICU 枚举未完成' : '✅ AICU 枚举完成';
       const added = comments.length - had;
       const gap = (!aborted && aicu.total && aicu.got !== aicu.total) ? `索引报 ${aicu.total}，本次收下 ${aicu.got}。` : '';
-      const fillNote = `${filledRows ? `补全了 ${filledRows} 条原来更短的正文。` : ''}${filledMeta ? `补上了 ${filledMeta} 条缺失的楼层或时间。` : ''}${rootClash ? `有 ${rootClash} 条的楼层和后一次不一致，仍用先看到的。` : ''}${placeClash ? `有 ${placeClash} 条的 oid 或类型和后一次不一致，删除仍用先看到的。` : ''}`;
+      const fillNote = `${filledRows ? `补全了 ${filledRows} 条原来更短的正文。` : ''}${filledMeta ? `补上了 ${filledMeta} 条缺失的楼层或时间。` : ''}${rootClash ? `有 ${rootClash} 条的楼层和后一次不一致，仍用先看到的。` : ''}${placeClash ? `有 ${placeClash} 条的 oid 或类型和后一次不一致，删除仍用先看到的。` : ''}${filledSrc ? `补上了 ${filledSrc} 条原来没有的来源。` : ''}${srcClash ? `有 ${srcClash} 条的来源和后一次不一致，仍用先看到的。` : ''}`;
       const aicuSum = `${aicuHead}：这次 +${added}，列表共 ${comments.length} 条（去重）。${fillNote}${aicu.stopReason || ''}${gap}索引可能滞后，不是官方实时列表。用时 ${fmtDur(Date.now() - t0)}。${aborted ? '后面的页没有继续。' : ''}${digestLine()}`;
       saveLastRun(aicuSum);
       setStatus(aicuSum);
@@ -1943,7 +1966,7 @@
       const added = comments.length - had;
       const videoNote = hist.videoFail ? `${hist.videoFail} 个视频没扫成。` : '';
       const moreNote = hist.cappedVideos ? `${hist.cappedVideos} 个视频后面还有评论，这次没翻。` : '';
-      const fillNote = `${filledRows ? `补全了 ${filledRows} 条原来更短的正文。` : ''}${filledMeta ? `补上了 ${filledMeta} 条缺失的楼层或时间。` : ''}${rootClash ? `有 ${rootClash} 条的楼层和后一次不一致，仍用先看到的。` : ''}${placeClash ? `有 ${placeClash} 条的 oid 或类型和后一次不一致，删除仍用先看到的。` : ''}`;
+      const fillNote = `${filledRows ? `补全了 ${filledRows} 条原来更短的正文。` : ''}${filledMeta ? `补上了 ${filledMeta} 条缺失的楼层或时间。` : ''}${rootClash ? `有 ${rootClash} 条的楼层和后一次不一致，仍用先看到的。` : ''}${placeClash ? `有 ${placeClash} 条的 oid 或类型和后一次不一致，删除仍用先看到的。` : ''}${filledSrc ? `补上了 ${filledSrc} 条原来没有的来源。` : ''}${srcClash ? `有 ${srcClash} 条的来源和后一次不一致，仍用先看到的。` : ''}`;
       const histSum = `${histHead}：这次 +${added}，列表共 ${comments.length} 条。每视频最近 ${scanPages} 页，最多 ${HISTORY_VIDEO_CAP} 个视频。用时 ${fmtDur(Date.now() - t0)}。${fillNote}${hist.historyStop || ''}${videoNote}${moreNote}${aborted ? '后面的视频没有继续。' : ''}${digestLine()}`;
       saveLastRun(histSum);
       setStatus(histSum);
@@ -2043,8 +2066,8 @@
     const per = delay + (recheckOn ? 600 : 0);
     const sample = String(targets[0].message || '(空评论)').replace(/\s+/g, ' ').slice(0, 36);
     const skipNote = skippedOk ? `\n已跳过 ${skippedOk} 条已确认删除。` : '';
-    const clashN = targets.filter((c) => c.placeClash || c.rootConflict).length;
-    const clashNote = clashN ? `\n其中 ${clashN} 条位置或楼层和后一次不一致，删除仍用先看到的。${onlyClash ? '' : '\n可先勾选「只看冲突」核对。'}` : '';
+    const clashN = targets.filter(hasClash).length;
+    const clashNote = clashN ? `\n其中 ${clashN} 条位置、楼层或来源和后一次不一致，删除仍用先看到的。${onlyClash ? '' : '\n可先勾选「只看冲突」核对。'}` : '';
     let outside = '';
     if (mode !== 'all' && mode !== 'explicit') {
       const visIds = new Set(visibleComments().map((c) => c.rpid));
