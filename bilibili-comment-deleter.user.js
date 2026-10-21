@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.139
+// @version      2.2.140
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.139';
+  const VERSION = '2.2.140';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1217,6 +1217,7 @@
 
   async function jumpTo(c) {
     if (!c.oid) { setStatus('该评论缺少 oid，无法跳转。'); return; }
+    const tab = (c.type === 1 || c.type === 11) ? window.open('about:blank', '_blank') : null;
     let url = null;
     let opened = '';
     if (c.type === 1) {
@@ -1231,6 +1232,7 @@
       setStatus(`正在确认 ${c.oid} 是分集号还是季号…`);
       const found = await resolveBangumiJump(c.oid);
       if (found.kind === 'season') {
+        if (tab) tab.close();
         const title = found.title ? `（${found.title}）` : '';
         setStatus(`oid ${c.oid} 是番剧季号${title}，不是分集号。评论在某一集上，这里不能确定是哪一集，所以没有打开。`);
         log(`跳转未打开：oid=${c.oid} 是番剧季号，不是分集号`, 'warn');
@@ -1244,9 +1246,16 @@
           : `没能确认 ep${c.oid} 是分集号，仍按分集打开。如果 404，说明这个 oid 不是分集号。`;
     }
     if (url) {
-      if (opened) setStatus(opened);
-      window.open(url, '_blank');
-    } else setStatus(`暂不支持 ${typeText(c.type)} 的跳转（oid=${c.oid}）。`);
+      if (tab) tab.location.href = url;
+      else if (!window.open(url, '_blank')) {
+        setStatus(`浏览器拦截了新标签。请允许弹出窗口，或手动打开：${url}`);
+        return;
+      }
+      setStatus(opened || '正在打开。');
+    } else {
+      if (tab) tab.close();
+      setStatus(`暂不支持 ${typeText(c.type)} 的跳转（oid=${c.oid}）。`);
+    }
   }
 
   /* ═══════════ 导出备份 ═══════════ */
