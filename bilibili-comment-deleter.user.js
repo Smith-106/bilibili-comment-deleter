@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.68
+// @version      2.2.69
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.68';
+  const VERSION = '2.2.69';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -347,6 +347,11 @@
     saveSettings();
   }
 
+  function clipMessage(s) {
+    const full = String(s || '');
+    return { message: full.slice(0, 200), cut: full.length > 200 };
+  }
+
   /** aicu 条目、原始单页，或本工具自己导出的扁对象 → 规范对象 */
   function mapAicuReply(it) {
     const rpid = Number(it && it.rpid);
@@ -355,11 +360,13 @@
     const type = Number((dyn && dyn.type) || (it && it.type));
     if (!rpid || !oid || !type) return null;
     const parent = (it && it.parent) || {};
+    const clip = clipMessage(it && it.message);
     return {
       rpid,
       oid,
       type,
-      message: String((it && it.message) || '').slice(0, 200),
+      message: clip.message,
+      cut: clip.cut,
       ctime: Number((it && (it.time || it.ctime)) || 0) || 0,
       root: parent.rootid ? Number(parent.rootid) : (Number(it && it.root) || 0),
       src: 'aicu',
@@ -571,11 +578,13 @@
         for (const entry of pool) {
           const r = entry.r;
           if (Number(r.mid) === mid) {
+            const clip = clipMessage(r.content && r.content.message);
             const item = {
               rpid: Number(r.rpid),
               oid: aid,
               type: 1,
-              message: ((r.content && r.content.message) || '').slice(0, 200),
+              message: clip.message,
+              cut: clip.cut,
               ctime: r.ctime || 0,
               root: entry.root,
               src: 'history',
@@ -1570,11 +1579,22 @@
     const msgDiv = document.createElement('div');
     if (c.message) appendQuery(msgDiv, c.message, filterKw);
     else msgDiv.textContent = '(空评论)';
+    if (c.cut) {
+      msgDiv.appendChild(document.createTextNode('…'));
+      msgDiv.title = '只保留前 200 字。更后面的内容在这里搜不到。';
+    }
     main.appendChild(msgDiv);
 
     const meta = document.createElement('div');
     meta.className = 'meta';
     meta.appendChild(document.createTextNode(`${typeText(c.type)} · ${fmtTime(c.ctime)} · rpid:${c.rpid} · ${SRC_TEXT[c.src] || c.src}`));
+    if (c.cut) {
+      const cut = document.createElement('span');
+      cut.className = `${P}-mark`;
+      cut.textContent = ' ·只显示前 200 字';
+      cut.title = '更后面的内容在这里搜不到。';
+      meta.appendChild(cut);
+    }
     if (filterKw) {
       const q = filterKw.toLowerCase();
       const inMsg = (c.message || '').toLowerCase().includes(q);
