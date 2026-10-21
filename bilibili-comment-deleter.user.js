@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.113
+// @version      2.2.114
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.113';
+  const VERSION = '2.2.114';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -917,18 +917,26 @@
     const key = `${oid}:${type}`;
     if (recheckCache.has(key)) return recheckCache.get(key);
     const map = new Map();
-    let complete = false, pages = 0, next = 0;
+    let complete = false, pages = 0, next = 0, walkError = '';
     for (let guard = 0; guard < RECHECK_TOP_MAX && !aborted; guard++) {
       let d;
       try {
         d = await gmGetJSON(`https://api.bilibili.com/x/v2/reply/main?type=${type}&oid=${oid}&mode=2&next=${next}`, { retries: 1 });
-      } catch (e) { log(`回查 walk 失败 oid=${oid}: ${e.message}`, 'warn'); break; }
+      } catch (e) {
+        walkError = e.message || '网络错误';
+        log(`回查 walk 失败 oid=${oid}: ${walkError}`, 'warn');
+        break;
+      }
       if (d.code === -101 || d.code === -111) {
         const why = ERR_TEXT[String(d.code)] || `code=${d.code}`;
         log(`回查 walk ${why} oid=${oid}`, 'err');
         return { map, complete: false, pages, auth: why };
       }
-      if (d.code !== 0) { log(`回查 walk code=${d.code} oid=${oid} type=${type}`, 'warn'); break; }
+      if (d.code !== 0) {
+        walkError = `code=${d.code}`;
+        log(`回查 walk code=${d.code} oid=${oid} type=${type}`, 'warn');
+        break;
+      }
       pages++;
       for (const top of ((d.data && d.data.replies) || [])) {
         map.set(String(top.rpid), '');
@@ -939,7 +947,7 @@
       next = c.next;
       await sleep(RECHECK_WALK_DELAY);
     }
-    const res = { map, complete, pages };
+    const res = { map, complete, pages, walkError };
     recheckCache.set(key, res);
     return res;
   }
@@ -949,20 +957,28 @@
     const key = `${oid}:${type}:${root}`;
     if (threadCache.has(key)) return threadCache.get(key);
     const set = new Set();
-    let complete = false;
+    let complete = false, walkError = '';
     for (let pn = 1; pn <= RECHECK_SUB_MAX && !aborted; pn++) {
       let d;
       try {
         d = await gmGetJSON(`https://api.bilibili.com/x/v2/reply/reply?type=${type}&oid=${oid}&root=${root}&pn=${pn}&ps=${RECHECK_SUB_PS}`, { retries: 1 });
-      } catch (e) { log(`楼层 walk 失败 root=${root}: ${e.message}`, 'warn'); break; }
-      if (d.code !== 0) { log(`楼层 walk code=${d.code} root=${root}`, 'warn'); break; }
+      } catch (e) {
+        walkError = e.message || '网络错误';
+        log(`楼层 walk 失败 root=${root}: ${walkError}`, 'warn');
+        break;
+      }
+      if (d.code !== 0) {
+        walkError = `code=${d.code}`;
+        log(`楼层 walk code=${d.code} root=${root}`, 'warn');
+        break;
+      }
       const rs = (d.data && d.data.replies) || [];
       for (const r of rs) set.add(String(r.rpid));
       const count = d.data && d.data.page && d.data.page.count;
       if ((typeof count === 'number' && pn * RECHECK_SUB_PS >= count) || rs.length < RECHECK_SUB_PS) { complete = true; break; }
       await sleep(RECHECK_WALK_DELAY);
     }
-    const res = { set, complete };
+    const res = { set, complete, walkError };
     threadCache.set(key, res);
     return res;
   }
@@ -988,23 +1004,29 @@
   async function recheckDefinitive(c) {
     const quick = await oracleCheck(c);
     if (quick && !quick.soft) return quick;
-    const withSoft = (why) => (quick && quick.soft && quick.why ? `${why}。${quick.why}` : why);
     const area = await walkArea(c.oid, c.type);
+    const explain = (why, extra) => {
+      const bits = [why];
+      if (extra) bits.push(extra);
+      if (area.walkError) bits.push(`区域翻页失败：${area.walkError}`);
+      if (quick && quick.soft && quick.why) bits.push(quick.why);
+      return bits.join('。');
+    };
     if (area.auth) return { state: 'auth', why: area.auth };
     if (area.map.has(String(c.rpid))) {
       return { state: 'fail', why: area.map.get(String(c.rpid)) ? '楼中楼内联预览仍在' : '顶评仍在' };
     }
     if (c.root) {
       if (!area.complete && !area.map.has(String(c.root))) {
-        return { state: 'uncertain', why: withSoft('区域未翻完，不能凭根楼缺失判断子评已删') };
+        return { state: 'uncertain', why: explain('区域未翻完，不能凭根楼缺失判断子评已删') };
       }
       if (!area.map.has(String(c.root))) return { state: 'ok', why: '根楼层已不存在，子评必然已删' };
       const th = await walkThread(c.oid, c.type, c.root);
       if (th.set.has(String(c.rpid))) return { state: 'fail', why: '楼内仍在' };
-      if (!th.complete) return { state: 'uncertain', why: withSoft(`楼内翻页未走完(≤${RECHECK_SUB_MAX}页)`) };
+      if (!th.complete) return { state: 'uncertain', why: explain(`楼内翻页未走完(≤${RECHECK_SUB_MAX}页)`, th.walkError ? `楼内翻页失败：${th.walkError}` : '') };
       return { state: 'ok', why: `整楼未发现(根=${c.root})` };
     }
-    if (!area.complete) return { state: 'uncertain', why: withSoft(`区域翻页未走完(≤${RECHECK_TOP_MAX}页)`) };
+    if (!area.complete) return { state: 'uncertain', why: explain(`区域翻页未走完(≤${RECHECK_TOP_MAX}页)`) };
     return { state: 'ok', why: `全区未发现(${area.pages}页)` };
   }
 
