@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.82
+// @version      2.2.83
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.82';
+  const VERSION = '2.2.83';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1487,8 +1487,8 @@
       if (saved.open === true) panel.style.display = 'flex';
     } catch (e) { /* noop */ }
     readDelay();
-    $el(`${P}-delay`).addEventListener('change', readDelay);
-    $el(`${P}-scanpages`).addEventListener('change', readScanPages);
+    $el(`${P}-delay`).addEventListener('change', () => readDelay(true));
+    $el(`${P}-scanpages`).addEventListener('change', () => readScanPages(true));
     window.addEventListener('beforeunload', (e) => {
       if (!deleting && !fetching) return;
       e.preventDefault();
@@ -2352,26 +2352,24 @@
       return c.oid && c.type && (st === 'fail' || st === 'uncertain');
     });
   }
-  function readDelay() {
+  function readDelay(announce) {
     const el = document.getElementById(`${P}-delay`);
     const raw = parseInt(el && el.value, 10);
     const n = Math.max(200, Math.min(5000, raw || DELAY_DEFAULT));
-    if (el && el.value !== String(n)) {
-      el.value = String(n);
-      saveSettings();
-      if (Number.isFinite(raw) && raw !== n) setStatus(`间隔已改成 ${n} 毫秒。允许 200 到 5000。`);
-    }
+    const clamped = Number.isFinite(raw) && raw !== n;
+    if (el && el.value !== String(n)) el.value = String(n);
+    if (announce || clamped) saveSettings();
+    if (announce) say(clamped ? `间隔已改成 ${n} 毫秒。允许 200 到 5000。下次删除用这个。` : `间隔 ${n} 毫秒。下次删除用这个。`);
     return n;
   }
-  function readScanPages() {
+  function readScanPages(announce) {
     const el = document.getElementById(`${P}-scanpages`);
     const raw = parseInt(el && el.value, 10);
     const n = Math.max(1, Math.min(10, raw || VIDEO_SCAN_PAGES_DEFAULT));
-    if (el && el.value !== String(n)) {
-      el.value = String(n);
-      if (Number.isFinite(raw) && raw !== n) setStatus(`每个视频已改成 ${n} 页。允许 1 到 10。`);
-    }
+    const clamped = Number.isFinite(raw) && raw !== n;
+    if (el && el.value !== String(n)) el.value = String(n);
     try { localStorage.setItem(`${P}_scanpages`, String(n)); } catch (e) { /* 记不住就用这一次的值 */ }
+    if (announce) say(clamped ? `每个视频已改成 ${n} 页。允许 1 到 10。下次扫描用这个。` : `每个视频扫 ${n} 页。下次扫描用这个。`);
     return n;
   }
   function setStatus(t) { const el = document.getElementById(`${P}-status`); if (el) el.textContent = t; }
