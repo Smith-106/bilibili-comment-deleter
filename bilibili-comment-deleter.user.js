@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.36
+// @version      2.2.37
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.36';
+  const VERSION = '2.2.37';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -478,7 +478,7 @@
     while (seenAids.size < HISTORY_VIDEO_CAP && guard < 400) {
       guard++;
       if (aborted) break;
-      startBeat(() => `翻历史 · 已收集 ${seenAids.size} 个视频 · 已用 ${spent()}`);
+      startBeat(() => `翻历史 · 已收集 ${seenAids.size}/${HISTORY_VIDEO_CAP} 个视频 · 每视频 ${scanPages} 页 · 已用 ${spent()}`);
       const url = `https://api.bilibili.com/x/web-interface/history/cursor?type=archive&ps=${HISTORY_PS}&max=${cursorMax}&view_at=${viewAt}`;
       let data;
       try { data = await gmGetJSON(url); }
@@ -497,7 +497,8 @@
       await sleep(800);
     }
 
-    log(`观看历史共 ${seenAids.size} 个视频，逐个扫描（每视频 ${scanPages} 页，时间序）…`);
+    const capNote = seenAids.size >= HISTORY_VIDEO_CAP ? `，已到 ${HISTORY_VIDEO_CAP} 个上限，更早的视频没翻` : '';
+    log(`观看历史共 ${seenAids.size} 个视频${capNote}，逐个扫描（每视频 ${scanPages} 页，时间序）…`, capNote ? 'warn' : 'info');
     let videoFail = 0;
     for (let hi = 0; hi < aids.length; hi++) {
       if (aborted) break;
@@ -997,7 +998,10 @@
       <div class="${P}-sec">
         <div class="${P}-row">
           <button class="${P}-btn ${P}-btn-p" id="${P}-load" title="通过第三方 aicu 索引拉取全部评论（推荐首选）">📥 AICU 获取</button>
-          <button class="${P}-btn" id="${P}-hist" title="翻观看历史→逐视频扫自己的评论（纯官方接口，仅视频评论）">🏛️ 官方历史</button>
+          <button class="${P}-btn" id="${P}-hist" title="翻观看历史，逐视频扫自己的评论。不是全量：只扫下面页数，并且最多 ${HISTORY_VIDEO_CAP} 个视频">🏛️ 官方历史</button>
+          <span style="color:var(--c-sub);font-size:12px">每视频</span>
+          <input class="${P}-input" type="number" id="${P}-scanpages" value="${Math.max(1, Math.min(10, Number(localStorage.getItem(`${P}_scanpages`)) || VIDEO_SCAN_PAGES_DEFAULT))}" min="1" max="10" step="1" title="每个视频只扫最近这么多页。默认 2。调大更慢，也更不容易漏掉较早的评论">
+          <span style="color:var(--c-sub);font-size:12px">页</span>
           <button class="${P}-btn" id="${P}-stop" style="display:none">⏹ 停止</button>
         </div>
         <div class="${P}-row" style="margin-top:7px">
@@ -1276,6 +1280,7 @@
     } catch (e) { /* noop */ }
     readDelay();
     $el(`${P}-delay`).addEventListener('change', readDelay);
+    $el(`${P}-scanpages`).addEventListener('change', readScanPages);
     window.addEventListener('beforeunload', (e) => {
       if (!deleting && !fetching) return;
       e.preventDefault();
@@ -1621,13 +1626,13 @@
     try {
       if (datasetUid && datasetUid !== myUid) log(`⚠️ 列表属于 UID=${datasetUid}，本次扫描账号 UID=${myUid}`, 'warn');
       else if (!datasetUid) datasetUid = myUid;
-      const scanPages = Number(localStorage.getItem(`${P}_scanpages`)) || VIDEO_SCAN_PAGES_DEFAULT;
-      log(`开始官方历史扫描 UID=${myUid}（每视频 ${scanPages} 页）`);
+      const scanPages = readScanPages();
+      log(`开始官方历史扫描 UID=${myUid}（每视频 ${scanPages} 页，最多 ${HISTORY_VIDEO_CAP} 个视频）`);
       const t0 = Date.now();
       await fetchHistoryComments(myUid, scanPages);
       renderList(); updCount();
       const histHead = aborted ? '已停止扫描' : '✅ 官方扫描完成';
-      const histSum = `${histHead}：累计 ${comments.length} 条。用时 ${fmtDur(Date.now() - t0)}。${aborted ? '后面的视频没有继续。' : ''}${digestLine()}`;
+      const histSum = `${histHead}：累计 ${comments.length} 条。每视频最近 ${scanPages} 页，最多 ${HISTORY_VIDEO_CAP} 个视频。用时 ${fmtDur(Date.now() - t0)}。${aborted ? '后面的视频没有继续。' : ''}${digestLine()}`;
       saveLastRun(histSum);
       setStatus(histSum);
       log(histHead, aborted ? 'warn' : 'ok');
@@ -1964,6 +1969,13 @@
       el.value = String(n);
       saveSettings();
     }
+    return n;
+  }
+  function readScanPages() {
+    const el = document.getElementById(`${P}-scanpages`);
+    const n = Math.max(1, Math.min(10, parseInt(el && el.value, 10) || VIDEO_SCAN_PAGES_DEFAULT));
+    if (el && el.value !== String(n)) el.value = String(n);
+    try { localStorage.setItem(`${P}_scanpages`, String(n)); } catch (e) { /* 记不住就用这一次的值 */ }
     return n;
   }
   function setStatus(t) { const el = document.getElementById(`${P}-status`); if (el) el.textContent = t; }
