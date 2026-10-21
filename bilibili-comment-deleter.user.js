@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.86
+// @version      2.2.87
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.86';
+  const VERSION = '2.2.87';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1164,7 +1164,7 @@
           <span style="color:var(--c-sub);font-size:12px">ms</span>
         </div>
         <label><input type="checkbox" id="${P}-recheck" checked> 删除后官方单条确认（不信 code=0；仍在则自动降速重试）</label>
-        <label><input type="checkbox" id="${P}-skipok" checked> 跳过日志里已确认删除的（重跑枚举时不再打这些接口）</label>
+        <label><input type="checkbox" id="${P}-skipok" checked> 跳过日志里已确认删除的（下次删除不再请求这些，枚举仍会列出）</label>
       </div>
       <div class="${P}-strip">
         <div class="r">
@@ -1498,7 +1498,11 @@
       e.returnValue = '';
     });
     $el(`${P}-recheck`).addEventListener('change', saveSettings);
-    $el(`${P}-skipok`).addEventListener('change', saveSettings);
+    $el(`${P}-skipok`).addEventListener('change', () => {
+      saveSettings();
+      const on = $el(`${P}-skipok`).checked;
+      say(on ? '下次删除会跳过日志里已确认删除的。枚举仍会把它们列出来。' : '下次删除不再跳过已确认删除的，会再请求它们。');
+    });
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape' || !(deleting || fetching)) return;
       const tag = e.target && e.target.tagName;
