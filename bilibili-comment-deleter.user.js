@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.14
+// @version      2.2.15
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.14';
+  const VERSION = '2.2.15';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -181,8 +181,23 @@
   }
   function journalMap() {
     if (journalMapCache) return journalMapCache;
-    journalMapCache = new Map(journalLoad().map((e) => [Number(e.rpid), e.state]));
-    return journalMapCache;
+    const m = new Map();
+    for (const e of journalLoad()) {
+      const id = Number(e.rpid);
+      if (!m.has(id)) m.set(id, e.state);
+    }
+    journalMapCache = m;
+    return m;
+  }
+
+  function journalStats() {
+    const m = journalMap();
+    let ok = 0, bad = 0;
+    for (const st of m.values()) {
+      if (st === 'ok') ok++;
+      else if (st === 'fail' || st === 'uncertain') bad++;
+    }
+    return { n: m.size, ok, bad };
   }
   function journalAdd(rpid, state) {
     try {
@@ -797,6 +812,7 @@
           <button class="${P}-btn" id="${P}-expj" title="导出当前筛选下列表为 JSON（删除前备份）">💾JSON</button>
           <button class="${P}-btn" id="${P}-expc" title="导出当前筛选下列表为 CSV">💾CSV</button>
           <button class="${P}-btn" id="${P}-reset" title="清空当前列表与勾选">🧹清空</button>
+          <button class="${P}-btn" id="${P}-forget" title="清除本地处理记录。已确认的评论下次不再自动跳过">清除记录</button>
         </div>
       </div>
       <div class="${P}-list" id="${P}-list">
@@ -878,6 +894,17 @@
       resetDataset();
       setStatus('列表已清空。');
       log('🧹 列表已清空', 'warn');
+    };
+    $el(`${P}-forget`).onclick = async () => {
+      const st = journalStats();
+      if (!st.n) { setStatus('没有本地处理记录。'); return; }
+      if (!(await ask(`清除 ${st.n} 条本地处理记录？\n已确认 ${st.ok}，未成功 ${st.bad}。\n列表还在，但这些评论不再被当成已删除。`, '清除'))) return;
+      try { localStorage.removeItem(JKEY); } catch (e) { /* noop */ }
+      journalMapCache = null;
+      renderList();
+      updCount();
+      setStatus('处理记录已清除。');
+      log('处理记录已清除', 'warn');
     };
 
     /* —— 删除 —— */
@@ -1008,8 +1035,10 @@
     /* —— 初始状态 —— */
     const csrf = getCookie('bili_jct');
     const uid = getCookie('DedeUserID');
-    if (csrf && uid) setStatus(`已登录 UID=${uid}，bili_jct 就绪。删除不可逆，请谨慎。`);
-    else setStatus('⚠️ 未检测到登录态（请先在 bilibili.com 登录后刷新）。可先导入/浏览，删除需登录。');
+    const remembered = journalStats();
+    const mem = remembered.n ? ` 本地记录 ${remembered.n} 条（已确认 ${remembered.ok}，未成功 ${remembered.bad}）。` : '';
+    if (csrf && uid) setStatus(`已登录 UID=${uid}，bili_jct 就绪。删除不可逆，请谨慎。${mem}`);
+    else setStatus(`⚠️ 未检测到登录态（请先在 bilibili.com 登录后刷新）。可先导入/浏览，删除需登录。${mem}`);
     renderList(); updCount();
   }
 
@@ -1317,7 +1346,7 @@
   }
 
   function lockWhileDeleting(locked) {
-    ['dsel', 'dall', 'retry', 'copybad', 'load', 'hist', 'import', 'reset'].forEach((k) => {
+    ['dsel', 'dall', 'retry', 'copybad', 'load', 'hist', 'import', 'reset', 'forget'].forEach((k) => {
       const el = document.getElementById(`${P}-${k}`);
       if (el) el.disabled = locked;
     });
