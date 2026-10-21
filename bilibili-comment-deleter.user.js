@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.25
+// @version      2.2.26
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.25';
+  const VERSION = '2.2.26';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -320,20 +320,21 @@
     renderList(); updCount();
   }
 
-  /** aicu 导出条目 / 单页原始 JSON 条目 → 规范对象 */
+  /** aicu 条目、原始单页，或本工具自己导出的扁对象 → 规范对象 */
   function mapAicuReply(it) {
     const rpid = Number(it && it.rpid);
     const dyn = (it && it.dyn) || {};
-    const oid = Number(dyn.oid);
-    const type = Number(dyn.type);
+    const oid = Number((dyn && dyn.oid) || (it && it.oid));
+    const type = Number((dyn && dyn.type) || (it && it.type));
     if (!rpid || !oid || !type) return null;
+    const parent = (it && it.parent) || {};
     return {
       rpid,
       oid,
       type,
-      message: (it.message || '').slice(0, 200),
-      ctime: it.time || 0,
-      root: (it.parent && it.parent.rootid) ? Number(it.parent.rootid) : 0,
+      message: String((it && it.message) || '').slice(0, 200),
+      ctime: Number((it && (it.time || it.ctime)) || 0) || 0,
+      root: parent.rootid ? Number(parent.rootid) : (Number(it && it.root) || 0),
       src: 'aicu',
     };
   }
