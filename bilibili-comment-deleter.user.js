@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.124
+// @version      2.2.125
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.124';
+  const VERSION = '2.2.125';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2431,7 +2431,12 @@
         try {
           startBeat(() => `①删除 ${i + 1}/${targets.length} · ${snippet} · 请求中 · 已用 ${fmtDur(Date.now() - t0)} · 剩余 ${fmtEta(leftDel)}`);
           j = await doDelete(c, csrf);
-        } catch (e) { result = 'fail'; whyNote = `请求异常：${e.message || '网络错误'}`; log(`✗ 请求异常 rpid=${c.rpid} ${e.message}`, 'err'); break; }
+        } catch (e) {
+          result = 'uncertain';
+          whyNote = `请求异常：${e.message || '网络错误'}，不知道这次有没有删掉`;
+          log(`～ 请求异常 rpid=${c.rpid} ${whyNote}`, 'warn');
+          break;
+        }
         finally { stopBeat(); }
         const codeStr = String(j.code);
         if (j.code === 0 || j.code === 12022 || j.code === -404) {
