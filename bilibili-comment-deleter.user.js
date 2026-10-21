@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.128
+// @version      2.2.129
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.128';
+  const VERSION = '2.2.129';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2142,9 +2142,10 @@
     const vis = shown.filter((c) => c.oid && c.type);
     const nSel = shown.filter((c) => selected.has(c.rpid)).length;
     const jm = journalMap();
-    let okN = 0, failN = 0, uncN = 0;
-    for (const c of vis) {
-      const st = jm.get(c.rpid);
+    let okN = 0, failN = 0, uncN = 0, noPlace = 0;
+    for (const c of comments) {
+      if (!c.oid || !c.type) { noPlace++; continue; }
+      const st = jm.get(idExact(c.rpid));
       if (st === 'ok') okN++;
       else if (st === 'fail') failN++;
       else if (st === 'uncertain') uncN++;
@@ -2183,8 +2184,11 @@
       }
       let clashAll = 0;
       for (const c of comments) if (hasClash(c)) clashAll++;
-      cnt.textContent = `${nSel}/${vis.length} · 已删${okN} 失败${failN} 待确认${uncN}${outside ? ` · 筛选外已勾${outside}` : ''}${clashAll ? ` · 冲突${clashAll}` : ''}`;
+      const hidden = comments.length - shown.length;
+      cnt.textContent = `${nSel}/${vis.length}${hidden ? ` · 共${comments.length}` : ''} · 已删${okN} 失败${failN} 待确认${uncN}${noPlace ? ` · 缺位置${noPlace}` : ''}${outside ? ` · 筛选外已勾${outside}` : ''}${clashAll ? ` · 冲突${clashAll}` : ''}`;
       const tips = [];
+      if (hidden) tips.push(`当前筛选 ${shown.length} 条，整份 ${comments.length} 条。已删、失败、待确认按整份列表算，不是只算眼前这些。`);
+      if (noPlace) tips.push(`${noPlace} 条没有 oid 或类型，不能删除。`);
       if (outside) tips.push('这些勾选不在当前筛选里。删除选中不会动它们。清除筛选后会重新出现。');
       if (clashAll) tips.push(`整份列表里有 ${clashAll} 条位置、楼层或来源冲突。勾选「只看冲突」可以单独看。`);
       cnt.title = tips.join('');
