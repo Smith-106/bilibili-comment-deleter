@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.129
+// @version      2.2.130
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.129';
+  const VERSION = '2.2.130';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2623,7 +2623,9 @@
 
     markActive(null);
     const unsent = targets.length - seen;
-    setProg(targets.length, targets.length, aborted ? '已停止' : (fail || uncertain || unsent) ? '未完全删除' : '完成');
+    const endPhase = aborted ? '已停止' : (fail || uncertain || unsent || recheckLeft) ? '未完全删除' : '完成';
+    if (recheckLeft && pending.length) setProg(Math.max(0, pending.length - recheckLeft), pending.length, endPhase);
+    else setProg(Math.min(seen, targets.length), targets.length, endPhase);
     const sec = Math.max(1, Math.round((Date.now() - t0) / 1000));
     let focusNote = '';
     if (fail > 0 && uncertain > 0) {
