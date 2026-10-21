@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.13
+// @version      2.2.14
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.13';
+  const VERSION = '2.2.14';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -60,6 +60,7 @@
   let sortMode = 'default';           // default | tasc | tdesc
   let fetching = false;
   let logOnlyBad = false;
+  let journalTrimWarned = false;
   let lastListPaint = 0;
   let deleting = false;
   let aborted = false;
@@ -185,12 +186,23 @@
   }
   function journalAdd(rpid, state) {
     try {
-      let j = journalLoad();
+      const j = journalLoad();
       j.unshift({ rpid: Number(rpid), state, t: Date.now() });
+      if (j.length > JOURNAL_CAP && !journalTrimWarned) {
+        journalTrimWarned = true;
+        log(`处理记录超过 ${JOURNAL_CAP} 条，更早的已丢弃。那些评论再出现时不会被当成已删除。`, 'warn');
+      }
       localStorage.setItem(JKEY, JSON.stringify(j.slice(0, JOURNAL_CAP)));
       journalMapCache = null;
-      paintMark(rpid, state);
-    } catch (e) { /* 容量满等原因，忽略 */ }
+    } catch (e) {
+      journalMapCache = null;
+      if (!journalTrimWarned) {
+        journalTrimWarned = true;
+        setStatus('浏览器拒绝保存处理记录，刷新后已确认状态可能丢失。');
+        log(`处理记录写入失败：${e.message}`, 'err');
+      }
+    }
+    paintMark(rpid, state);
   }
 
   /** 已渲染行即时改徽标，不必等整批结束再重绘列表 */
@@ -872,9 +884,8 @@
     $el(`${P}-dsel`).onclick = () => runDelete('selected');
     $el(`${P}-dall`).onclick = () => runDelete('all');
     $el(`${P}-retry`).onclick = () => {
-      const rp = [...(batchResults || [])].filter(([, s]) => s !== 'ok').map(([r]) => r);
-      const targets = comments.filter((c) => rp.includes(c.rpid) && c.oid && c.type);
-      if (!targets.length) { setStatus('没有需要重试的条目。'); return; }
+      const targets = badInList();
+      if (!targets.length) { setStatus('当前列表里没有未成功、且能删除的条目。'); return; }
       runDelete('explicit', targets, '重试未成功');
     };
     $el(`${P}-retry`).style.display = 'none';
@@ -1206,6 +1217,12 @@
       copyBtn.style.display = bad && !deleting ? 'inline-block' : 'none';
       copyBtn.textContent = `复制未成功 (${bad})`;
     }
+    const retryBtn = document.getElementById(`${P}-retry`);
+    if (retryBtn) {
+      const nRetry = badInList().length;
+      retryBtn.style.display = nRetry && !deleting ? 'inline-block' : 'none';
+      retryBtn.textContent = `↻ 重试未成功 (${nRetry})`;
+    }
     const cnt = document.getElementById(`${P}-cnt`);
     if (cnt) cnt.textContent = `${nSel}/${vis.length} · 已删${okN} 失败${failN} 待确认${uncN}`;
   }
@@ -1481,12 +1498,6 @@
     lockWhileDeleting(false);
     armStop(false);
     renderList(); updCount();
-
-    if (fail + uncertain > 0) {
-      const rb = document.getElementById(`${P}-retry`);
-      rb.textContent = `↻ 重试未成功(${fail + uncertain})`;
-      rb.style.display = 'inline-block';
-    }
   }
 
   /* ═══════════ 小部件 ═══════════ */
@@ -1499,8 +1510,27 @@
     d.textContent = `[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${msg}`;
     const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
     el.appendChild(d);
-    while (el.children.length > 300) el.removeChild(el.firstChild);
+    let trimmed = false;
+    while (el.children.length > 300) { el.removeChild(el.firstChild); trimmed = true; }
+    if (trimmed) {
+      let note = el.querySelector(`.${P}-log-trim`);
+      if (!note) {
+        note = document.createElement('div');
+        note.className = `${P}-log-line ${P}-warn ${P}-log-trim`;
+        note.textContent = '更早的日志已省略，只保留最近约 300 行。';
+      }
+      el.insertBefore(note, el.firstChild);
+      while (el.children.length > 301) el.removeChild(el.children[1]);
+    }
     if (stick) el.scrollTop = el.scrollHeight;
+  }
+
+  function badInList() {
+    const jm = journalMap();
+    return comments.filter((c) => {
+      const st = jm.get(Number(c.rpid));
+      return c.oid && c.type && (st === 'fail' || st === 'uncertain');
+    });
   }
   function setStatus(t) { const el = document.getElementById(`${P}-status`); if (el) el.textContent = t; }
 
