@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.123
+// @version      2.2.124
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.123';
+  const VERSION = '2.2.124';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -166,13 +166,50 @@
     });
   }
 
-  function parseJsonRes(r) {
-    let j = r.response;
-    if (j == null || typeof j === 'string') {
-      try { j = JSON.parse(r.responseText); }
-      catch (e) { throw new Error('非 JSON 响应 (HTTP ' + r.status + ')'); }
+  function parseJsonKeepIds(text) {
+    const src = String(text);
+    let out = '';
+    let i = 0;
+    let inStr = false;
+    let esc = false;
+    while (i < src.length) {
+      const ch = src[i];
+      if (inStr) {
+        out += ch;
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+        i++;
+        continue;
+      }
+      if (ch === '"') { inStr = true; out += ch; i++; continue; }
+      if (ch === '-' || (ch >= '0' && ch <= '9')) {
+        const start = i;
+        if (ch === '-') i++;
+        const digits = i;
+        while (i < src.length && src[i] >= '0' && src[i] <= '9') i++;
+        const n = i - digits;
+        const rest = src[i];
+        const isInt = n > 0 && rest !== '.' && rest !== 'e' && rest !== 'E';
+        const token = src.slice(start, i);
+        if (isInt && n >= 16 && src[start] !== '-') out += `"${src.slice(digits, i)}"`;
+        else out += token;
+        continue;
+      }
+      out += ch;
+      i++;
     }
-    return j;
+    return JSON.parse(out);
+  }
+  function parseJsonRes(r) {
+    const text = r && typeof r.responseText === 'string' ? r.responseText : '';
+    if (text.trim()) {
+      try { return parseJsonKeepIds(text); }
+      catch (e) { throw new Error('非 JSON 响应 (HTTP ' + ((r && r.status) || '?') + ')'); }
+    }
+    const j = r && r.response;
+    if (j && typeof j === 'object') return j;
+    throw new Error('非 JSON 响应 (HTTP ' + ((r && r.status) || '?') + ')');
   }
 
   const RETRYABLE_HTTP = (s) => s === 412 || s === 429 || (s >= 500 && s < 600 && s !== 509);
