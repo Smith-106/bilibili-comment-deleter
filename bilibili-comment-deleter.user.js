@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.29
+// @version      2.2.30
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.29';
+  const VERSION = '2.2.30';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -355,6 +355,18 @@
   function stopBeat() {
     if (beatTimer) clearInterval(beatTimer);
     beatTimer = 0;
+  }
+  async function waitTick(ms, textFn) {
+    if (!(ms >= 1000)) { await sleep(ms); return; }
+    const until = Date.now() + ms;
+    try {
+      startBeat(() => {
+        if (aborted) return '';
+        const left = Math.max(0, Math.ceil((until - Date.now()) / 1000));
+        return textFn(left);
+      });
+      await sleep(ms);
+    } finally { stopBeat(); }
   }
 
   /* ═══════════ 枚举一：AICU 自动拉取 ═══════════ */
@@ -1707,9 +1719,9 @@
             log(`✗ rpid=${c.rpid} ${why}，重试后仍失败`, 'err');
             break;
           }
-          setStatus(`${why}，${Math.round(wait / 1000)}s 后重试 ${attempt + 1}/${DELETE_MAX_RETRY - 1} · rpid=${c.rpid}`);
           log(`⏳ ${why}，${wait}ms 后重试（${attempt + 1}/${DELETE_MAX_RETRY - 1}）…`, 'warn');
-          await sleep(wait); attempt++;
+          await waitTick(wait, (left) => `${why}，${left}s 后重试 ${attempt + 1}/${DELETE_MAX_RETRY - 1} · rpid=${c.rpid} · 已用 ${fmtDur(Date.now() - t0)}`);
+          attempt++;
           continue;
         }
         result = 'fail';
@@ -1728,7 +1740,7 @@
       } else {
         pending.push(c);
       }
-      await sleep(delay);
+      await waitTick(delay, (left) => `本条已请求 · ${left}s 后下一条 · 已用 ${fmtDur(Date.now() - t0)}`);
     }
 
     // ── 统一回查（v2.2.2：单条官方接口；仍在则降速重删；walk 仅兜底） ──
@@ -1751,9 +1763,8 @@
         }
         if (v && v.state === 'fail' && !aborted) {
           for (let s = 0; s < SHADOW_RETRY; s++) {
-            setStatus(`↻ 影子重试 ${s + 1}/${SHADOW_RETRY} · rpid=${c.rpid}（接口回成功但评论仍在）`);
             log(`↻ 评论仍在，降速重试 ${s + 1}/${SHADOW_RETRY} rpid=${c.rpid}`, 'warn');
-            await sleep(SHADOW_WAIT);
+            await waitTick(SHADOW_WAIT, (left) => `↻ 影子重试 ${s + 1}/${SHADOW_RETRY} · ${left}s 后提交 · rpid=${c.rpid} · 已用 ${fmtDur(Date.now() - t0)}`);
             let dj = null;
             try { dj = await doDelete(c, csrf); } catch (e) { break; }
             if (dj && (dj.code === -101 || dj.code === -111)) {
