@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.81
+// @version      2.2.82
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.81';
+  const VERSION = '2.2.82';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1305,16 +1305,21 @@
     $el(`${P}-selall`).onclick = () => {
       const outside = outsideSelected();
       let n = 0;
-      visibleComments().forEach((c) => { if (c.oid && c.type) { selected.add(c.rpid); n++; } });
+      let skip = 0;
+      visibleComments().forEach((c) => {
+        if (c.oid && c.type) { selected.add(c.rpid); n++; }
+        else skip++;
+      });
       renderList(); updCount();
-      setStatus(outside ? `已勾选当前筛选 ${n} 条。筛选外还有 ${outside} 条，没有取消。` : `已勾选 ${n} 条。`);
+      const skipNote = skip ? `有 ${skip} 条缺 oid 或类型，没勾。` : '';
+      say(outside ? `已勾选当前筛选 ${n} 条。筛选外还有 ${outside} 条，没有取消。${skipNote}` : `已勾选 ${n} 条。${skipNote}`);
     };
     $el(`${P}-selnone`).onclick = () => {
       const outside = outsideSelected();
       const n = selected.size;
       selected.clear();
       renderList(); updCount();
-      setStatus(!n ? '没有勾选。' : outside ? `已去掉全部勾选，包括筛选外的 ${outside} 条。` : `已去掉 ${n} 条勾选。`);
+      say(!n ? '没有勾选。' : outside ? `已去掉全部勾选，包括筛选外的 ${outside} 条。` : `已去掉 ${n} 条勾选。`);
     };
     $el(`${P}-expj`).onclick = () => doExport('json');
     $el(`${P}-expc`).onclick = () => doExport('csv');
@@ -1536,7 +1541,7 @@
     const ia = list.findIndex((c) => c.rpid === a);
     const ib = list.findIndex((c) => c.rpid === b);
     if (ia < 0 || ib < 0) {
-      setStatus('连选没生效。起点不在当前列表里，请先点一条，再按住 Shift 点另一条。');
+      say('连选没生效。起点不在当前列表里，请先点一条，再按住 Shift 点另一条。');
       return;
     }
     const lo = Math.min(ia, ib);
@@ -1551,7 +1556,8 @@
     }
     anchorRpid = b;
     renderList();
-    setStatus(`已连选 ${n} 条（当前筛选内，含两端）。${skip ? `缺字段跳过 ${skip} 条。` : ''}`);
+    updCount();
+    say(`已连选 ${n} 条（当前筛选内，含两端）。${skip ? `缺字段跳过 ${skip} 条。` : ''}`);
   }
 
   function outsideSelected() {
