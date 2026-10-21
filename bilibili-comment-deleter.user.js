@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.8
+// @version      2.2.9
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.8';
+  const VERSION = '2.2.9';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -58,6 +58,8 @@
   let filtState = 'all';          // all | ok | fail | uncertain | none
   let sortMode = 'default';           // default | tasc | tdesc
   let fetching = false;
+  let logOnlyBad = false;
+  let lastListPaint = 0;
   let deleting = false;
   let aborted = false;
   let batchResults = null;            // Map(rpid → 'ok'|'uncertain'|'fail')，最近一次批次
@@ -308,6 +310,7 @@
       }
       log(`第 ${page} 页: +${added} 条（累计 ${comments.length}${total ? '/' + total : ''}）`, 'info');
       setStatus(`枚举第 ${page} 页 · 累计 ${comments.length}${total ? '/' + total : ''} · 本页 +${added}`);
+      touchList(true);
       if (total) setProg(Math.min(comments.length, total), total, '枚举');
 
       if (data.data && data.data.cursor && data.data.cursor.is_end) break;
@@ -351,6 +354,7 @@
       if (aborted) break;
       const aid = aids[hi];
       setStatus(`扫描视频 ${hi + 1}/${aids.length} · 已找到 ${comments.length} 条`);
+      touchList(false);
       setProg(hi, aids.length, '扫描');
       try { await fetchOwnRepliesFromVideo(aid, mid, scanPages); }
       catch (e) { log(`视频 ${aid} 扫描失败: ${e.message}`, 'warn'); }
@@ -694,6 +698,8 @@
         font-family:'Cascadia Code',Consolas,'Courier New',monospace;background:var(--c-logbg);
         border-top:1px solid var(--c-secbd)}
       .${P}-log-line{padding:2px 0;word-break:break-all}
+      .${P}-log-hide{display:none}
+      .${P}-logbar{display:flex;justify-content:flex-end;padding:2px 14px 0}
       .${P}-ok{color:#2ed573} .${P}-err{color:#ff4757} .${P}-warn{color:#ffa502} .${P}-info{color:#70a1ff}
     `;
     document.head.appendChild(s);
@@ -785,6 +791,7 @@
         <span class="${P}-pct" id="${P}-pct">0%</span>
       </div>
       <div class="${P}-status" id="${P}-status"></div>
+      <div class="${P}-logbar"><button type="button" class="${P}-btn" id="${P}-logbad" style="padding:2px 8px">只看问题</button></div>
       <div class="${P}-log" id="${P}-log"></div>
     `;
     document.body.appendChild(panel);
@@ -796,6 +803,15 @@
       panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
     };
     $el(`${P}-close`).onclick = () => { panel.style.display = 'none'; };
+    $el(`${P}-logbad`).onclick = () => {
+      logOnlyBad = !logOnlyBad;
+      $el(`${P}-logbad`).textContent = logOnlyBad ? '显示全部' : '只看问题';
+      const box = $el(`${P}-log`);
+      for (const line of box.children) {
+        const bad = line.classList.contains(`${P}-err`) || line.classList.contains(`${P}-warn`);
+        line.classList.toggle(`${P}-log-hide`, logOnlyBad && !bad);
+      }
+    };
     $el(`${P}-stop`).onclick = () => {
       aborted = true;
       $el(`${P}-stop`).disabled = true;
@@ -1404,6 +1420,7 @@
     if (!el) return;
     const d = document.createElement('div');
     d.className = `${P}-log-line ${P}-${type || 'info'}`;
+    if (logOnlyBad && type !== 'err' && type !== 'warn') d.classList.add(`${P}-log-hide`);
     d.textContent = `[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${msg}`;
     const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
     el.appendChild(d);
@@ -1411,6 +1428,12 @@
     if (stick) el.scrollTop = el.scrollHeight;
   }
   function setStatus(t) { const el = document.getElementById(`${P}-status`); if (el) el.textContent = t; }
+  function touchList(force) {
+    const now = Date.now();
+    if (!force && now - lastListPaint < 800) return;
+    lastListPaint = now;
+    renderList();
+  }
   function showProg(show) {
     const el = document.getElementById(`${P}-prog`);
     if (!el) return;
