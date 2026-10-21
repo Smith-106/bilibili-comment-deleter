@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.77
+// @version      2.2.78
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.77';
+  const VERSION = '2.2.78';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -672,12 +672,15 @@
     else if (data.data && Array.isArray(data.data.replies)) replies = data.data.replies;
     if (!replies) return { ok: false, msg: '未识别的结构：需要 replies 数组（aicu 导出 / 原始单页 JSON / 裸数组）' };
 
-    let added = 0, dup = 0, invalid = 0;
+    let added = 0, dup = 0, invalid = 0, keptSrc = 0;
+    const srcFrom = { aicu: 'aicu', history: 'history', import: 'import', manual: 'manual', '官方历史': 'history', '导入': 'import', '回查': 'manual' };
     const states = [];
     for (const it of replies) {
       const item = mapAicuReply(it);
       if (!item) { invalid++; continue; }
-      item.src = 'import';
+      const known = srcFrom[String((it && it.src) || '').trim()];
+      if (known && known !== 'import') { item.src = known; keptSrc++; }
+      else item.src = 'import';
       if (addIfAbsent(item)) added++; else dup++;
       const st = stateFromExport(it && it.state);
       if (st) states.push({ rpid: item.rpid, state: st });
@@ -687,7 +690,8 @@
     const partial = !Array.isArray(data) && data.exported != null && data.total != null && Number(data.exported) < Number(data.total);
     const scopeNote = partial ? `。这是筛选导出（${data.exported}/${data.total}），不是当时的全部` : '';
     const fillNote = `${filledRows ? `，补全更短正文 ${filledRows}` : ''}${filledMeta ? `，补上楼层或时间 ${filledMeta}` : ''}${rootClash ? `，${rootClash} 条楼层和后一次不一致，仍用先看到的` : ''}${placeClash ? `，${placeClash} 条的 oid 或类型和后一次不一致，删除仍用先看到的` : ''}${restoredMarks ? `，恢复冲突标记 ${restoredMarks}` : ''}`;
-    return { ok: true, msg: `导入完成：新增 ${added}，重复 ${dup}，无效 ${invalid}${fillNote}${extra}${scopeNote}` };
+    const srcNote = keptSrc ? `，沿用原来源 ${keptSrc}` : '';
+    return { ok: true, msg: `导入完成：新增 ${added}，重复 ${dup}，无效 ${invalid}${fillNote}${srcNote}${extra}${scopeNote}` };
   }
 
   function parseCsv(text) {
