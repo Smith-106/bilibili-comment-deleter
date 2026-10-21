@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.158
+// @version      2.2.159
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.158';
+  const VERSION = '2.2.159';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1092,7 +1092,7 @@
       rpid: col(cols, 'rpid'),
       oid: col(cols, 'oid'),
       type: col(cols, 'type'),
-      message: col(cols, 'message'),
+      message: csvUnshield(col(cols, 'message')),
       ctime: col(cols, 'ctime'),
       root: col(cols, 'root'),
       src: col(cols, 'src'),
@@ -1101,7 +1101,7 @@
       placeClash: col(cols, 'placeClash'),
       rootConflict: col(cols, 'rootConflict'),
       srcConflict: col(cols, 'srcConflict'),
-      why: col(cols, 'why'),
+      why: csvUnshield(col(cols, 'why')),
     }));
     return importJson(JSON.stringify(replies));
   }
@@ -1395,9 +1395,15 @@
   }
 
   /* ═══════════ 导出备份 ═══════════ */
+  const CSV_GUARD = '\u200B';
   function csvCell(s) {
     s = String(s == null ? '' : s);
+    if (/^[=+\-@]/.test(s)) s = CSV_GUARD + s;
     return '"' + s.replace(/"/g, '""') + '"';
+  }
+  function csvUnshield(s) {
+    s = String(s == null ? '' : s);
+    return s.startsWith(CSV_GUARD) ? s.slice(1) : s;
   }
 
   function stateFromExport(v) {
