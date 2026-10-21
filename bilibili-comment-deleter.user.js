@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.152
+// @version      2.2.153
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.152';
+  const VERSION = '2.2.153';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -434,6 +434,12 @@
     const id = idExact(v);
     return id ? String(id) : '';
   }
+  function historyOtherKey(business, h, it) {
+    const hist = h || {};
+    const row = it || {};
+    const id = rpidKey(hist.oid || hist.epid || hist.cid || hist.sid || row.oid || row.kid || row.id);
+    return id && business ? `${business}:${id}` : '';
+  }
   function replyMid(r) {
     if (!r) return '';
     if (r.mid != null && String(r.mid).trim() !== '') return r.mid;
@@ -710,6 +716,7 @@
     let cursorMax = 0;
     let viewAt = 0;
     const seenAids = new Set();
+    const otherSeen = new Set();
     let guard = 0;
     const before = comments.length;
     const fresh = () => comments.length - before;
@@ -749,7 +756,13 @@
       for (const it of list) {
         const h = it.history || {};
         const business = h.business || '';
-        if (business && business !== 'archive') { historyOther++; continue; }
+        if (business && business !== 'archive') {
+          const otherKey = historyOtherKey(business, h, it);
+          if (otherKey && otherSeen.has(otherKey)) continue;
+          if (otherKey) otherSeen.add(otherKey);
+          historyOther++;
+          continue;
+        }
         const raw = h.oid || h.aid || it.aid;
         const key = rpidKey(raw);
         if (!key || seenAids.has(key)) continue;
@@ -774,7 +787,7 @@
     }
 
     const capNote = seenAids.size >= HISTORY_VIDEO_CAP ? `，已到 ${HISTORY_VIDEO_CAP} 个上限，更早的视频没翻` : '';
-    const otherNote = historyOther ? `，另有 ${historyOther} 条不是视频，没扫` : '';
+    const otherNote = historyOther ? `，另有 ${historyOther} 个不是视频的条目，重复的只计一次，没扫` : '';
     log(`观看历史共 ${seenAids.size} 个视频${capNote}${otherNote}，逐个扫描（每视频 ${scanPages} 页，时间序）…`, capNote || historyStop ? 'warn' : 'info');
     for (let hi = 0; hi < aids.length; hi++) {
       if (aborted) break;
@@ -2459,7 +2472,7 @@
       const histHead = aborted ? '已停止扫描' : hist.historyStop ? '官方扫描未翻完' : (videoNote || moreNote || cursorNote || authorNote || threadNote) ? '官方扫描有遗漏' : '✅ 官方扫描完成';
       const threadTail = threadNote ? `${threadNote}。每视频最多补 ${HISTORY_THREAD_OPEN_MAX} 条楼的第一页。` : '';
       const fillNote = `${filledRows ? `补全了 ${filledRows} 条原来更短的正文。` : ''}${filledMeta ? `补上了 ${filledMeta} 条缺失的楼层或时间。` : ''}${rootClash ? `有 ${rootClash} 条的楼层和后一次不一致，仍用先看到的。` : ''}${placeClash ? `有 ${placeClash} 条的 oid 或类型和后一次不一致，删除仍用先看到的。` : ''}${filledSrc ? `补上了 ${filledSrc} 条原来没有的来源。` : ''}${srcClash ? `有 ${srcClash} 条的来源和后一次不一致，仍用先看到的。` : ''}`;
-      const otherNote = hist.historyOther ? `另外 ${hist.historyOther} 条历史不是视频，没扫。` : '';
+      const otherNote = hist.historyOther ? `另外 ${hist.historyOther} 个不是视频的条目，重复的只计一次，没扫。` : '';
       const stopScan = aborted
         ? (hist.videosPlanned ? `视频扫到 ${hist.videosDone || 0}/${hist.videosPlanned} 个就停了。` : '还没收集到视频就停了。')
         : '';
