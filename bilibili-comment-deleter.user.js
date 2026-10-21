@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.94
+// @version      2.2.95
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.94';
+  const VERSION = '2.2.95';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -570,7 +570,9 @@
     let historyStop = '';
     let videoFail = 0;
     let cappedVideos = 0;
-    let hiddenThreads = 0;
+    let threadSkipped = 0;
+    let threadMore = 0;
+    let threadFail = 0;
     resetFillStats();
 
     try {
@@ -621,7 +623,9 @@
       try {
         const scan = await fetchOwnRepliesFromVideo(aid, mid, scanPages, pace);
         if (scan && scan.capped) cappedVideos++;
-        hiddenThreads += (scan && scan.hiddenThreads) || 0;
+        threadSkipped += (scan && scan.threadSkipped) || 0;
+        threadMore += (scan && scan.threadMore) || 0;
+        threadFail += (scan && scan.threadFail) || 0;
       }
       catch (e) {
         videoFail++;
@@ -634,10 +638,18 @@
       await sleep(HISTORY_VIDEO_DELAY);
     }
     const capBit = cappedVideos ? `，${cappedVideos} 个视频后面还有评论，这次没翻` : '';
-    const threadBit = hiddenThreads ? `，${hiddenThreads} 条楼层的楼中楼没翻完。每视频最多补 ${HISTORY_THREAD_OPEN_MAX} 条楼的第一页` : '';
-    log(`官方历史扫描结束，这次 +${fresh()}，列表共 ${comments.length} 条${videoFail ? `，${videoFail} 个视频失败` : ''}${capBit}${threadBit}${historyStop ? `。${historyStop}` : ''}`, videoFail || historyStop || cappedVideos || hiddenThreads ? 'warn' : 'ok');
-    return { historyStop, videoFail, cappedVideos, hiddenThreads };
+    const threadBit = threadGapText(threadSkipped, threadMore, threadFail);
+    log(`官方历史扫描结束，这次 +${fresh()}，列表共 ${comments.length} 条${videoFail ? `，${videoFail} 个视频失败` : ''}${capBit}${threadBit ? `，${threadBit}` : ''}${historyStop ? `。${historyStop}` : ''}`, videoFail || historyStop || cappedVideos || threadBit ? 'warn' : 'ok');
+    return { historyStop, videoFail, cappedVideos, threadSkipped, threadMore, threadFail };
     } finally { stopBeat(); }
+  }
+
+  function threadGapText(skipped, more, failed) {
+    const bits = [];
+    if (skipped) bits.push(`${skipped} 条楼没轮到补`);
+    if (more) bits.push(`${more} 条楼第一页后面还有`);
+    if (failed) bits.push(`${failed} 条楼第一页没要到`);
+    return bits.join('，');
   }
 
   async function pullOwnThreadPage(aid, root, mid) {
@@ -667,31 +679,33 @@
   async function fetchOwnRepliesFromVideo(aid, mid, scanPages, pace) {
     let nextPage = 0;
     let guard = 0;
-    let hiddenThreads = 0;
+    let threadSkipped = 0;
+    let threadMore = 0;
+    let threadFail = 0;
     let openedThreads = 0;
     let capped = false;
     const queued = new Set();
     const later = [];
     const done = (cappedNow) => {
       if (pace) pace.thread = '';
-      return { capped: cappedNow, hiddenThreads };
+      return { capped: cappedNow, threadSkipped, threadMore, threadFail };
     };
     async function openNow(list) {
       let n = 0;
       let addedN = 0;
       for (let i = 0; i < list.length; i++) {
-        if (aborted) { hiddenThreads += list.length - i; break; }
+        if (aborted) { threadSkipped += list.length - i; break; }
         const item = list[i];
-        if (openedThreads >= HISTORY_THREAD_OPEN_MAX) { hiddenThreads++; continue; }
+        if (openedThreads >= HISTORY_THREAD_OPEN_MAX) { threadSkipped++; continue; }
         openedThreads++;
         n++;
         if (pace) pace.thread = `补楼 ${item.rootId}`;
         try {
           const extra = await pullOwnThreadPage(aid, item.rootId, mid);
           addedN += extra.added || 0;
-          if (extra.more) hiddenThreads++;
+          if (extra.more) threadMore++;
         } catch (e) {
-          hiddenThreads++;
+          threadFail++;
           log(`楼 ${item.rootId} 第一页没补上: ${e.message}`, 'warn');
         }
         await sleep(400);
@@ -701,7 +715,7 @@
     }
     while (guard < scanPages) {
       guard++;
-      if (aborted) { hiddenThreads += later.length; return done(false); }
+      if (aborted) { threadSkipped += later.length; return done(false); }
       const d = await gmGetJSON(`https://api.bilibili.com/x/v2/reply/main?type=1&oid=${aid}&mode=2&next=${nextPage}`);
       if (d.code !== 0) throw new Error(`av${aid} 评论接口 code=${d.code}`);
       let added = 0;
@@ -740,7 +754,7 @@
       log(`  aid=${aid} 第${guard}页 +${added}`, 'info');
       const opened = await openNow(pageFirst);
       if (opened.n) log(`  aid=${aid} 第${guard}页补楼 ${opened.n}（预览里没有自己），+${opened.addedN}`, 'info');
-      if (aborted) { hiddenThreads += later.length; return done(capped); }
+      if (aborted) { threadSkipped += later.length; return done(capped); }
       const c = (d.data && d.data.cursor) || {};
       if (c.is_end) break;
       if (typeof c.next !== 'number' || c.next === nextPage) break;
@@ -2083,12 +2097,13 @@
       const added = comments.length - had;
       const videoNote = hist.videoFail ? `${hist.videoFail} 个视频没扫成。` : '';
       const moreNote = hist.cappedVideos ? `${hist.cappedVideos} 个视频后面还有评论，这次没翻。` : '';
-      const threadNote = hist.hiddenThreads ? `${hist.hiddenThreads} 条楼层的楼中楼没翻完。每视频最多补 ${HISTORY_THREAD_OPEN_MAX} 条楼的第一页，更深的自己的评论可能没进列表。` : '';
+      const threadNote = threadGapText(hist.threadSkipped, hist.threadMore, hist.threadFail);
+      const threadTail = threadNote ? `${threadNote}。每视频最多补 ${HISTORY_THREAD_OPEN_MAX} 条楼的第一页。` : '';
       const fillNote = `${filledRows ? `补全了 ${filledRows} 条原来更短的正文。` : ''}${filledMeta ? `补上了 ${filledMeta} 条缺失的楼层或时间。` : ''}${rootClash ? `有 ${rootClash} 条的楼层和后一次不一致，仍用先看到的。` : ''}${placeClash ? `有 ${placeClash} 条的 oid 或类型和后一次不一致，删除仍用先看到的。` : ''}${filledSrc ? `补上了 ${filledSrc} 条原来没有的来源。` : ''}${srcClash ? `有 ${srcClash} 条的来源和后一次不一致，仍用先看到的。` : ''}`;
-      const histSum = `${histHead}：这次 +${added}，列表共 ${comments.length} 条。每视频最近 ${scanPages} 页，最多 ${HISTORY_VIDEO_CAP} 个视频。用时 ${fmtDur(Date.now() - t0)}。${fillNote}${hist.historyStop || ''}${videoNote}${moreNote}${threadNote}${aborted ? '后面的视频没有继续。' : ''}${digestLine()}`;
+      const histSum = `${histHead}：这次 +${added}，列表共 ${comments.length} 条。每视频最近 ${scanPages} 页，最多 ${HISTORY_VIDEO_CAP} 个视频。用时 ${fmtDur(Date.now() - t0)}。${fillNote}${hist.historyStop || ''}${videoNote}${moreNote}${threadTail}${aborted ? '后面的视频没有继续。' : ''}${digestLine()}`;
       saveLastRun(histSum);
       setStatus(histSum);
-      log(`${histHead}，这次 +${added}，列表共 ${comments.length} 条`, aborted || hist.historyStop || hist.videoFail || hist.cappedVideos || hist.hiddenThreads ? 'warn' : 'ok');
+      log(`${histHead}，这次 +${added}，列表共 ${comments.length} 条`, aborted || hist.historyStop || hist.videoFail || hist.cappedVideos || threadNote ? 'warn' : 'ok');
     } catch (e) {
       stopBeat();
       const added = comments.length - had;
