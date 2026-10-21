@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.10
+// @version      2.2.11
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.10';
+  const VERSION = '2.2.11';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -985,6 +985,10 @@
   }
 
   /* ═══════════ 视图/筛选 ═══════════ */
+  function filtersOn() {
+    return !!(filterKw || filtSrc !== 'all' || filtType !== 'all' || filtState !== 'all');
+  }
+
   function visibleComments() {
     let list = comments;
     if (filterKw) list = list.filter((c) => (c.message || '').toLowerCase().includes(filterKw.toLowerCase()));
@@ -1132,7 +1136,11 @@
     const dsel = document.getElementById(`${P}-dsel`);
     const dall = document.getElementById(`${P}-dall`);
     if (dsel) { dsel.disabled = !nDel || deleting || fetching; dsel.textContent = `🔥 删除选中 (${nDel})`; }
-    if (dall) { dall.disabled = !vis.length || deleting || fetching; dall.textContent = `💣 删除全部 (${vis.length})`; }
+    if (dall) {
+      dall.disabled = !vis.length || deleting || fetching;
+      dall.textContent = `${filtersOn() ? '💣 删除当前' : '💣 删除全部'} (${vis.length})`;
+      dall.title = filtersOn() ? '只删除当前筛选里能删的评论，不会动被筛掉的' : '删除列表里能删的全部评论';
+    }
     const copyBtn = document.getElementById(`${P}-copybad`);
     if (copyBtn) {
       let bad = 0;
@@ -1249,8 +1257,8 @@
     if (mode === 'explicit' && explicitTargets) {
       targets = explicitTargets; scope = scopeLabel || '重试';
     } else if (mode === 'all') {
-      targets = comments.filter((c) => c.oid && c.type);
-      scope = '全部列表';
+      targets = visibleComments().filter((c) => c.oid && c.type);
+      scope = filtersOn() ? '当前筛选' : '全部列表';
     } else {
       targets = visibleComments().filter((c) => c.oid && c.type && selected.has(c.rpid));
       scope = '筛选下选中';
