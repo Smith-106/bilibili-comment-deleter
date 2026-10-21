@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.65
+// @version      2.2.66
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.65';
+  const VERSION = '2.2.66';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -404,6 +404,7 @@
     let total = 0;
     let got = 0;
     let hop = '';
+    let stopReason = '';
     const spent = () => fmtDur(Date.now() - t0);
     const before = comments.length;
     const fresh = () => comments.length - before;
@@ -433,6 +434,7 @@
           aicuUrl = AICU_APIS[1];
           continue;
         }
+        stopReason = `接口错误：${data.message || data.code}。后面的页没有继续。`;
         log(`AICU 错误: ${data.message || data.code}`, 'err');
         break;
       }
@@ -444,7 +446,14 @@
       }
 
       const replies = (data.data && data.data.replies) || [];
-      if (!replies.length) { log('AICU 数据已全部获取'); break; }
+      if (!replies.length) {
+        if (data.data && data.data.cursor && data.data.cursor.is_end) log('AICU 数据已全部获取');
+        else {
+          stopReason = '这一页是空的，但索引没说已经结束。后面的页没有继续。';
+          log(stopReason, 'warn');
+        }
+        break;
+      }
 
       let added = 0;
       for (const it of replies) {
@@ -464,7 +473,7 @@
       page++;
       await sleep(AICU_DELAY);
     }
-    return { total, got };
+    return { total, got, stopReason };
     } finally { stopBeat(); }
   }
 
@@ -1760,13 +1769,13 @@
       const t0 = Date.now();
       const aicu = await fetchAicuComments(myUid) || { total: 0, got: 0 };
       renderList(); updCount();
-      const aicuHead = aborted ? '已停止枚举' : '✅ AICU 枚举完成';
+      const aicuHead = aborted ? '已停止枚举' : aicu.stopReason ? 'AICU 枚举未完成' : '✅ AICU 枚举完成';
       const added = comments.length - had;
       const gap = (!aborted && aicu.total && aicu.got !== aicu.total) ? `索引报 ${aicu.total}，本次收下 ${aicu.got}。` : '';
-      const aicuSum = `${aicuHead}：这次 +${added}，列表共 ${comments.length} 条（去重）。${gap}索引可能滞后，不是官方实时列表。用时 ${fmtDur(Date.now() - t0)}。${aborted ? '后面的页没有继续。' : ''}${digestLine()}`;
+      const aicuSum = `${aicuHead}：这次 +${added}，列表共 ${comments.length} 条（去重）。${aicu.stopReason || ''}${gap}索引可能滞后，不是官方实时列表。用时 ${fmtDur(Date.now() - t0)}。${aborted ? '后面的页没有继续。' : ''}${digestLine()}`;
       saveLastRun(aicuSum);
       setStatus(aicuSum);
-      log(`${aicuHead}，这次 +${added}，列表共 ${comments.length} 条`, aborted ? 'warn' : 'ok');
+      log(`${aicuHead}，这次 +${added}，列表共 ${comments.length} 条`, aborted || aicu.stopReason ? 'warn' : 'ok');
     } catch (e) {
       stopBeat();
       const added = comments.length - had;
