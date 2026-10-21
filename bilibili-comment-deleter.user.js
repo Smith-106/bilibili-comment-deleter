@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.55
+// @version      2.2.56
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.55';
+  const VERSION = '2.2.56';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1386,19 +1386,23 @@
     const list = (viewSnap && viewSnap.length) ? viewSnap : visibleComments();
     const ia = list.findIndex((c) => c.rpid === a);
     const ib = list.findIndex((c) => c.rpid === b);
-    if (ia < 0 || ib < 0) return;
+    if (ia < 0 || ib < 0) {
+      setStatus('连选没生效。起点不在当前列表里，请先点一条，再按住 Shift 点另一条。');
+      return;
+    }
     const lo = Math.min(ia, ib);
     const hi = Math.max(ia, ib);
     let n = 0;
+    let skip = 0;
     for (let i = lo; i <= hi; i++) {
       const c = list[i];
-      if (!c.oid || !c.type) continue;
+      if (!c.oid || !c.type) { skip++; continue; }
       selected.add(c.rpid);
       n++;
     }
     anchorRpid = b;
     renderList();
-    setStatus(`已连选 ${n} 条（当前筛选内，含两端）。`);
+    setStatus(`已连选 ${n} 条（当前筛选内，含两端）。${skip ? `缺字段跳过 ${skip} 条。` : ''}`);
   }
 
   function outsideSelected() {
