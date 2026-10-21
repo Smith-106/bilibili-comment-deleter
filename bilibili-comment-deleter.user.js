@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.127
+// @version      2.2.128
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.127';
+  const VERSION = '2.2.128';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -658,7 +658,7 @@
   async function fetchHistoryComments(myUid, scanPages) {
     const t0 = Date.now();
     const spent = () => fmtDur(Date.now() - t0);
-    const mid = Number(myUid);
+    const mid = rpidKey(myUid);
     const aids = [];
     let cursorMax = 0;
     let viewAt = 0;
@@ -766,7 +766,7 @@
     const rs = (d.data && d.data.replies) || [];
     let added = 0;
     for (const r of rs) {
-      if (Number(r.mid) !== mid) continue;
+      if (rpidKey(r.mid) !== mid) continue;
       const clip = clipMessage(r.content && r.content.message);
       if (addIfAbsent({
         rpid: idExact(r.rpid),
@@ -836,7 +836,7 @@
         );
         for (const entry of pool) {
           const r = entry.r;
-          if (Number(r.mid) === mid) {
+          if (rpidKey(r.mid) === mid) {
             const clip = clipMessage(r.content && r.content.message);
             const item = {
               rpid: idExact(r.rpid),
@@ -855,7 +855,7 @@
         const rootId = idExact(top.rpid) || 0;
         if (rcount > preview.length && rootId && !queued.has(rootId)) {
           queued.add(rootId);
-          const seen = preview.some((s) => Number(s.mid) === mid);
+          const seen = preview.some((s) => rpidKey(s.mid) === mid);
           (seen ? later : pageFirst).push({ rootId });
         }
       }
