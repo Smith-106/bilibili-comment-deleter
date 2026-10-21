@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.16
+// @version      2.2.17
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.16';
+  const VERSION = '2.2.17';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -62,6 +62,7 @@
   let logOnlyBad = false;
   let journalTrimWarned = false;
   let lastListPaint = 0;
+  let savedTitle = '';
   let deleting = false;
   let aborted = false;
   let batchResults = null;            // Map(rpid → 'ok'|'uncertain'|'fail')，最近一次批次
@@ -649,6 +650,8 @@
         box-shadow:0 2px 14px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;
         user-select:none;transition:transform .2s}
       #${P}-toggle:hover{transform:scale(1.12)}
+      #${P}-toggle[data-busy="1"]{box-shadow:0 0 0 3px #ffb020, 0 2px 14px rgba(0,0,0,.35)}
+      @media (prefers-reduced-motion: reduce){ #${P}-toggle{transition:none} }
 
       #${P}-panel{position:fixed;top:50%;right:24px;transform:translateY(-50%);width:480px;max-height:84vh;
         z-index:999998;background:var(--c-bg);border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.55);
@@ -850,7 +853,9 @@
 
     /* —— 顶部 —— */
     toggle.onclick = () => {
-      panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
+      const open = panel.style.display === 'none';
+      panel.style.display = open ? 'flex' : 'none';
+      if (open && !deleting && !fetching) paintBusy(null);
     };
     $el(`${P}-close`).onclick = () => { panel.style.display = 'none'; };
     $el(`${P}-logbad`).onclick = () => {
@@ -1627,6 +1632,17 @@
     lastListPaint = now;
     renderList();
   }
+  function paintBusy(label) {
+    const btn = document.getElementById(`${P}-toggle`);
+    if (!savedTitle) savedTitle = document.title;
+    if (label) {
+      document.title = `${label} · ${savedTitle}`;
+      if (btn) { btn.dataset.busy = '1'; btn.title = `${label}。点此打开面板`; }
+    } else {
+      if (savedTitle) document.title = savedTitle;
+      if (btn) { btn.dataset.busy = ''; btn.title = `B站评论批量删除 v${VERSION}`; }
+    }
+  }
   function showProg(show) {
     const el = document.getElementById(`${P}-prog`);
     if (!el) return;
@@ -1634,14 +1650,16 @@
     if (show) {
       document.getElementById(`${P}-fill`).style.width = '0%';
       document.getElementById(`${P}-pct`).textContent = '0%';
-    }
+    } else paintBusy(null);
   }
   function setProg(done, total, phase) {
     const pct = total ? Math.round((done / total) * 100) : 0;
     const fill = document.getElementById(`${P}-fill`);
     const pctEl = document.getElementById(`${P}-pct`);
+    const label = `${phase ? phase + ' ' : ''}${pct}% (${done}/${total})`;
     if (fill) fill.style.width = pct + '%';
-    if (pctEl) pctEl.textContent = `${phase ? phase + ' ' : ''}${pct}% (${done}/${total})`;
+    if (pctEl) pctEl.textContent = label;
+    if (phase) paintBusy(label);
   }
 
   /* ═══════════ 初始化 ═══════════ */
