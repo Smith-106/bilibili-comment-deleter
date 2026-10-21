@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.12
+// @version      2.2.13
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.12';
+  const VERSION = '2.2.13';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -916,6 +916,11 @@
       if (!row) return;
       const rpid = Number(row.dataset.rpid);
       if (!rpid) return;
+      const rowItem = comments.find((x) => x.rpid === rpid);
+      if (rowItem && (!rowItem.oid || !rowItem.type)) {
+        setStatus(`rpid=${rpid} 缺少 oid 或 type，不能删除。`);
+        return;
+      }
       const textSel = window.getSelection && String(window.getSelection());
       if (textSel) return;
       if (e.shiftKey && anchorRpid) {
@@ -1062,9 +1067,13 @@
     row.className = `${P}-item`;
     row.dataset.rpid = String(c.rpid);
 
+    const can = !!(c.oid && c.type);
+    if (!can) selected.delete(c.rpid);
     const cb = document.createElement('input');
     cb.type = 'checkbox';
-    cb.checked = selected.has(c.rpid);
+    cb.checked = can && selected.has(c.rpid);
+    cb.disabled = !can;
+    cb.title = can ? '' : '缺少 oid 或 type，不能删除';
     cb.dataset.rpid = String(c.rpid);
     row.appendChild(cb);
 
@@ -1237,7 +1246,7 @@
       datasetUid = myUid;
       await fetchAicuComments(myUid);
       renderList(); updCount();
-      setStatus(`✅ AICU 枚举完成：累计 ${comments.length} 条（去重）。`);
+      setStatus(`✅ AICU 枚举完成：累计 ${comments.length} 条（去重）。${digestLine()}`);
       log(`✅ AICU 枚举完成，累计 ${comments.length} 条`, 'ok');
     } catch (e) {
       setStatus(`❌ 枚举失败：${e.message}`);
@@ -1267,7 +1276,7 @@
       log(`开始官方历史扫描 UID=${myUid}（每视频 ${scanPages} 页）`);
       await fetchHistoryComments(myUid, scanPages);
       renderList(); updCount();
-      setStatus(`✅ 官方扫描完成：累计 ${comments.length} 条。`);
+      setStatus(`✅ 官方扫描完成：累计 ${comments.length} 条。${digestLine()}`);
       log(`✅ 官方历史扫描完成`, 'ok');
     } catch (e) {
       setStatus(`❌ 官方扫描失败：${e.message}`);
@@ -1286,7 +1295,7 @@
     if (!raw) { setStatus('请先粘贴 JSON 内容。'); return; }
     const r = importJson(raw);
     renderList();
-    setStatus(r.ok ? `✅ ${r.msg}（来源标记：导入）` : `❌ ${r.msg}`);
+    setStatus(r.ok ? `✅ ${r.msg}（来源标记：导入）。${digestLine()}` : `❌ ${r.msg}`);
     log(r.ok ? `导入: ${r.msg}` : `导入失败: ${r.msg}`, r.ok ? 'ok' : 'err');
   }
 
@@ -1494,6 +1503,26 @@
     if (stick) el.scrollTop = el.scrollHeight;
   }
   function setStatus(t) { const el = document.getElementById(`${P}-status`); if (el) el.textContent = t; }
+
+  function digestLine() {
+    const by = new Map();
+    let ok = 0, bad = 0, nodeal = 0;
+    const jm = journalMap();
+    for (const c of comments) {
+      const name = typeText(c.type);
+      by.set(name, (by.get(name) || 0) + 1);
+      const st = jm.get(Number(c.rpid));
+      if (st === 'ok') ok++;
+      else if (st === 'fail' || st === 'uncertain') bad++;
+      if (!c.oid || !c.type) nodeal++;
+    }
+    const parts = [...by.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, v]) => `${k} ${v}`);
+    const extra = [];
+    if (ok) extra.push(`已确认 ${ok}`);
+    if (bad) extra.push(`未成功 ${bad}`);
+    if (nodeal) extra.push(`无法删除 ${nodeal}`);
+    return ` ${parts.join(' · ')}${extra.length ? ' · ' + extra.join(' · ') : ''}`;
+  }
 
   function ask(text, okLabel) {
     return new Promise((resolve) => {
