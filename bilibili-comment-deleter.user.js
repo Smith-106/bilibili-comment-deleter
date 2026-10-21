@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.32
+// @version      2.2.33
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.32';
+  const VERSION = '2.2.33';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1061,7 +1061,7 @@
         <span class="${P}-pct" id="${P}-pct">0%</span>
       </div>
       <div class="${P}-status" id="${P}-status"></div>
-      <div class="${P}-logbar"><button type="button" class="${P}-btn" id="${P}-logbad" style="padding:2px 8px">只看问题</button></div>
+      <div class="${P}-logbar"><button type="button" class="${P}-btn" id="${P}-logbad" style="padding:2px 8px">只看问题</button><button type="button" class="${P}-btn" id="${P}-logcopy" style="padding:2px 8px" title="复制当前还留着的日志。更早被省略的行不在其中">复制日志</button></div>
       <div class="${P}-log" id="${P}-log"></div>
       <div class="${P}-ask" id="${P}-ask" style="display:none" role="dialog" aria-modal="true">
         <div class="${P}-askbox">
@@ -1091,6 +1091,18 @@
       for (const line of box.children) {
         const bad = line.classList.contains(`${P}-err`) || line.classList.contains(`${P}-warn`);
         line.classList.toggle(`${P}-log-hide`, logOnlyBad && !bad);
+      }
+      saveSettings();
+    };
+    $el(`${P}-logcopy`).onclick = async () => {
+      const box = $el(`${P}-log`);
+      const lines = [...box.children].filter((el) => !el.classList.contains(`${P}-log-trim`)).map((el) => el.textContent);
+      if (!lines.length) { setStatus('日志是空的。'); return; }
+      try {
+        await navigator.clipboard.writeText(lines.join('\n'));
+        setStatus(`已复制 ${lines.length} 行日志。更早被省略的行不在其中。`);
+      } catch (e) {
+        setStatus('复制失败。请允许剪贴板，或从日志里手动选择。');
       }
     };
     $el(`${P}-stop`).onclick = () => {
@@ -1250,6 +1262,10 @@
       if (saved.recheck === false) $el(`${P}-recheck`).checked = false;
       if (saved.skipOk === false) $el(`${P}-skipok`).checked = false;
       if (saved.theme === 'light') panel.setAttribute('data-theme', 'light');
+      if (saved.logOnlyBad) {
+        logOnlyBad = true;
+        $el(`${P}-logbad`).textContent = '显示全部';
+      }
       if (saved.left && saved.top && Number(saved.left) > 0 && Number(saved.left) < window.innerWidth - 100
           && Number(saved.top) > 0 && Number(saved.top) < window.innerHeight - 60) {
         panel.style.right = 'auto';
@@ -1297,6 +1313,7 @@
         recheck: document.getElementById(`${P}-recheck`).checked,
         skipOk: document.getElementById(`${P}-skipok`).checked,
         theme: panel && panel.getAttribute('data-theme') || 'dark',
+        logOnlyBad,
         left: panel && panel.style.left ? parseInt(panel.style.left, 10) : 0,
         top: panel && panel.style.top ? parseInt(panel.style.top, 10) : 0,
       }));
