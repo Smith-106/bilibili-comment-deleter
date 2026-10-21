@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.48
+// @version      2.2.49
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.48';
+  const VERSION = '2.2.49';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1203,9 +1203,23 @@
 
     /* —— 列表事件委托（万级数据不挂） —— */
     const listEl = $el(`${P}-list`);
+    let selLockNote = 0;
+    const noteSelLocked = () => {
+      const now = Date.now();
+      if (now - selLockNote < 3000) return;
+      selLockNote = now;
+      log('勾选没有改：删除确认或进行中，这次范围已经定了。', 'warn');
+      setStatus('勾选先不动。这次要删的范围已经定了，停掉之后再改。');
+    };
     listEl.addEventListener('change', (e) => {
       if (!e.target.matches('input[type="checkbox"]')) return;
       if (e.target.dataset.skip === '1') { e.target.dataset.skip = ''; return; }
+      if (deleting || confirming) {
+        const rpid = Number(e.target.dataset.rpid);
+        e.target.checked = selected.has(rpid);
+        noteSelLocked();
+        return;
+      }
       const rpid = Number(e.target.dataset.rpid);
       e.target.checked ? selected.add(rpid) : selected.delete(rpid);
       updCount();
@@ -1227,6 +1241,7 @@
         return;
       }
       if (e.target.closest('a')) return;
+      if (deleting || confirming) { noteSelLocked(); return; }
       const row = e.target.closest(`.${P}-item`);
       if (!row) return;
       const rpid = Number(row.dataset.rpid);
