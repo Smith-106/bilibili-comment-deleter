@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.84
+// @version      2.2.85
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.84';
+  const VERSION = '2.2.85';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1236,7 +1236,7 @@
       $el(`${P}-logbad`).textContent = logOnlyBad ? '显示全部' : '只看问题';
       const box = $el(`${P}-log`);
       for (const line of box.children) {
-        const bad = line.classList.contains(`${P}-err`) || line.classList.contains(`${P}-warn`);
+        const bad = line.classList.contains(`${P}-err`) || line.classList.contains(`${P}-warn`) || line.classList.contains(`${P}-keep`);
         line.classList.toggle(`${P}-log-hide`, logOnlyBad && !bad);
       }
       saveSettings();
@@ -2325,8 +2325,9 @@
     const el = document.getElementById(`${P}-log`);
     if (!el) return;
     const d = document.createElement('div');
-    d.className = `${P}-log-line ${P}-${type || 'info'}`;
-    if (logOnlyBad && type !== 'err' && type !== 'warn') d.classList.add(`${P}-log-hide`);
+    const keep = type === 'keep';
+    d.className = `${P}-log-line ${P}-${keep ? 'info' : (type || 'info')}${keep ? ` ${P}-keep` : ''}`;
+    if (logOnlyBad && !keep && type !== 'err' && type !== 'warn') d.classList.add(`${P}-log-hide`);
     d.textContent = `[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${msg}`;
     const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
     el.appendChild(d);
@@ -2374,11 +2375,11 @@
   }
   function paintStatus(t) { const el = document.getElementById(`${P}-status`); if (el) el.textContent = t; }
   function setStatus(t) {
-    if (beatTimer && !aborted) { log(t, 'info'); return; }
+    if (beatTimer && !aborted) { log(t, 'keep'); return; }
     paintStatus(t);
   }
   function say(t) {
-    if (beatTimer) log(t, 'info');
+    if (beatTimer) log(t, 'keep');
     else setStatus(t);
   }
 
