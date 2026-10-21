@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.47
+// @version      2.2.48
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.47';
+  const VERSION = '2.2.48';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1737,7 +1737,9 @@
 
   function lockWhileDeleting(locked) {
     const keys = ['dsel', 'dall', 'retry', 'copybad', 'load', 'hist', 'import', 'reset', 'forget',
-      'kw', 'filter', 'clearf', 'srcsel', 'typesel', 'statesel', 'sortsel', 'selall', 'selnone', 'expj', 'expc'];
+      'kw', 'filter', 'clearf', 'srcsel', 'typesel', 'statesel', 'sortsel', 'selall', 'selnone', 'expj', 'expc',
+      'delay', 'recheck', 'skipok'];
+    const whyFixed = '这次删除已经按开始时的间隔、回查和跳过设置在跑。停掉之后再改，下次生效';
     const why = '删除确认或进行中，筛选和导出先锁住，避免列表和正在删的范围对不上';
     keys.forEach((k) => {
       const el = document.getElementById(`${P}-${k}`);
@@ -1745,7 +1747,7 @@
       el.disabled = locked;
       if (locked) {
         if (el.dataset.lockTitle == null) el.dataset.lockTitle = el.title || '';
-        el.title = why;
+        el.title = (k === 'delay' || k === 'recheck' || k === 'skipok') ? whyFixed : why;
       } else if (el.dataset.lockTitle != null) {
         el.title = el.dataset.lockTitle;
         delete el.dataset.lockTitle;
