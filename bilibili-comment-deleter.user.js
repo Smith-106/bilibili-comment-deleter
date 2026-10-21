@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.50
+// @version      2.2.51
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.50';
+  const VERSION = '2.2.51';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -340,8 +340,7 @@
     datasetUid = '';
     batchResults = null;
     filterKw = ''; filtSrc = 'all'; filtType = 'all'; filtState = 'all'; sortMode = 'default';
-    const stSel = document.getElementById(`${P}-statesel`);
-    if (stSel) stSel.value = 'all';
+    syncFilterControls();
     const rb = document.getElementById(`${P}-retry`);
     if (rb) rb.style.display = 'none';
     renderList(); updCount();
@@ -1407,19 +1406,23 @@
     return bits;
   }
 
+  function syncFilterControls() {
+    const kw = document.getElementById(`${P}-kw`);
+    if (kw && kw.value !== filterKw) kw.value = filterKw;
+    for (const [id, val] of [[`${P}-srcsel`, filtSrc], [`${P}-typesel`, filtType], [`${P}-statesel`, filtState], [`${P}-sortsel`, sortMode]]) {
+      const el = document.getElementById(id);
+      if (el && el.value !== val) el.value = val;
+    }
+  }
+
   function clearFilters() {
     filterKw = '';
     filtSrc = 'all';
     filtType = 'all';
     filtState = 'all';
-    const kw = document.getElementById(`${P}-kw`);
-    if (kw) kw.value = '';
-    for (const [id, val] of [[`${P}-srcsel`, 'all'], [`${P}-typesel`, 'all'], [`${P}-statesel`, 'all']]) {
-      const el = document.getElementById(id);
-      if (el) el.value = val;
-    }
+    syncFilterControls();
     renderList();
-    setStatus('筛选已清除。');
+    setStatus('筛选已清除。排序还在。');
   }
 
   function visibleComments() {
