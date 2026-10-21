@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.37
+// @version      2.2.38
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.37';
+  const VERSION = '2.2.38';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1199,6 +1199,15 @@
       updCount();
     });
     listEl.addEventListener('click', (e) => {
+      const cp = e.target.closest('button[data-act="copyid"]');
+      if (cp) {
+        const c = comments.find((x) => x.rpid === Number(cp.dataset.rpid));
+        const text = c ? `rpid=${c.rpid}\toid=${c.oid || ''}\ttype=${c.type || ''}` : `rpid=${cp.dataset.rpid}`;
+        navigator.clipboard.writeText(text).then(() => {
+          setStatus(c ? `已复制 rpid=${c.rpid} oid=${c.oid || '无'} type=${c.type || '无'}` : `已复制 ${text}`);
+        }).catch(() => setStatus('复制失败。请允许剪贴板，或从日志里手动选择。'));
+        return;
+      }
       const jb = e.target.closest('button[data-act="jump"]');
       if (jb) {
         const c = comments.find((x) => x.rpid === Number(jb.dataset.rpid));
@@ -1439,6 +1448,13 @@
     main.appendChild(meta);
     row.appendChild(main);
 
+    const idb = document.createElement('button');
+    idb.className = `${P}-jump`;
+    idb.textContent = '⧉';
+    idb.title = '复制这一条的 rpid、oid、type';
+    idb.dataset.act = 'copyid';
+    idb.dataset.rpid = String(c.rpid);
+    row.appendChild(idb);
     if (c.oid && c.type) {
       const jb = document.createElement('button');
       jb.className = `${P}-jump`;
