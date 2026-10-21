@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.116
+// @version      2.2.117
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.116';
+  const VERSION = '2.2.117';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1401,11 +1401,19 @@
       logOnlyBad = !logOnlyBad;
       $el(`${P}-logbad`).textContent = logOnlyBad ? '显示全部' : '只看问题';
       const box = $el(`${P}-log`);
+      let hidden = 0, shown = 0;
       for (const line of box.children) {
+        if (line.classList.contains(`${P}-log-trim`)) continue;
         const bad = line.classList.contains(`${P}-err`) || line.classList.contains(`${P}-warn`) || line.classList.contains(`${P}-keep`);
-        line.classList.toggle(`${P}-log-hide`, logOnlyBad && !bad);
+        const hide = logOnlyBad && !bad;
+        line.classList.toggle(`${P}-log-hide`, hide);
+        if (hide) hidden++; else shown++;
       }
       saveSettings();
+      refreshLogCopyTitle();
+      if (!hidden && !shown) setStatus(logOnlyBad ? '只看问题：日志是空的。' : '日志是空的。');
+      else if (logOnlyBad) setStatus(hidden ? `只看问题：藏起 ${hidden} 行，还显示 ${shown} 行。` : '只看问题：当前没有要藏的行。');
+      else setStatus(`已显示全部 ${shown} 行日志。`);
     };
     $el(`${P}-logcopy`).onclick = async () => {
       const box = $el(`${P}-log`);
@@ -1645,6 +1653,7 @@
         logOnlyBad = true;
         $el(`${P}-logbad`).textContent = '显示全部';
       }
+      refreshLogCopyTitle();
       if (saved.left && saved.top && Number(saved.left) > 0 && Number(saved.left) < window.innerWidth - 100
           && Number(saved.top) > 0 && Number(saved.top) < window.innerHeight - 60) {
         panel.style.right = 'auto';
@@ -2582,6 +2591,16 @@
       }
     }
     if (stick) el.scrollTop = el.scrollHeight;
+    if (trimmed) refreshLogCopyTitle();
+  }
+  function refreshLogCopyTitle() {
+    const btn = document.getElementById(`${P}-logcopy`);
+    const box = document.getElementById(`${P}-log`);
+    if (!btn || !box) return;
+    const bits = ['复制当前看得到的日志。'];
+    if (logOnlyBad) bits.push('只看问题开着，藏起来的行不复制。');
+    bits.push(box.querySelector(`.${P}-log-trim`) ? '更早被省略的行也不在其中。' : '更早的行还没有被省略。');
+    btn.title = bits.join('');
   }
 
   function dropLogLine(el) {
