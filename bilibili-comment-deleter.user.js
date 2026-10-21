@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.118
+// @version      2.2.119
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.118';
+  const VERSION = '2.2.119';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2247,7 +2247,11 @@
     const r = importAny(raw);
     renderList();
     if (r.ok) document.getElementById(`${P}-ta`).value = '';
-    setStatus(r.ok ? `${r.warn ? '⚠️' : '✅'} ${r.msg}。输入框已清空，避免再导入同一份。${digestLine()}` : `❌ ${r.msg}`);
+    const importNote = r.ok
+      ? `${r.msg}。输入框已清空。这份列表只在当前页，刷新后会清空，处理记录里补上的状态还在。`
+      : `${r.msg}。当前列表没改。`;
+    saveLastRun(r.ok ? `${r.warn ? '导入有问题' : '导入'}：${importNote}` : `导入失败：${importNote}`);
+    setStatus(r.ok ? `${r.warn ? '⚠️' : '✅'} ${importNote}${digestLine()}` : `❌ ${importNote}`);
     log(r.ok ? `导入: ${r.msg}` : `导入失败: ${r.msg}`, !r.ok ? 'err' : r.warn ? 'warn' : 'ok');
   }
 
