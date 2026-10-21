@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.154
+// @version      2.2.155
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.154';
+  const VERSION = '2.2.155';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -130,9 +130,16 @@
     } catch (e) { return ''; }
   }
 
+  function replyTime(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return Math.floor(n >= 1e12 ? n / 1000 : n);
+  }
   function fmtTime(t) {
-    if (!t) return '';
-    const d = new Date(Number(t) * 1000);
+    const sec = replyTime(t);
+    if (!sec) return '';
+    const d = new Date(sec * 1000);
+    if (Number.isNaN(d.getTime())) return '';
     const p = (n) => String(n).padStart(2, '0');
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
   }
@@ -580,7 +587,7 @@
       placeClash: flagOn(it && it.placeClash),
       rootConflict: flagOn(it && it.rootConflict),
       srcConflict: flagOn(it && it.srcConflict),
-      ctime: Number((it && (it.time || it.ctime)) || 0) || 0,
+      ctime: replyTime((it && (it.time || it.ctime)) || 0),
       root: parent.rootid ? idExact(parent.rootid) : (idExact(it && it.root) || 0),
       src: 'aicu',
     };
@@ -882,7 +889,7 @@
         type: 1,
         message: clip.message,
         cut: clip.cut,
-        ctime: r.ctime || 0,
+        ctime: replyTime(r.ctime),
         root,
         src: 'history',
       })) added++;
@@ -958,7 +965,7 @@
               type: 1,
               message: clip.message,
               cut: clip.cut,
-              ctime: r.ctime || 0,
+              ctime: replyTime(r.ctime),
               root: entry.root,
               src: 'history',
             };
