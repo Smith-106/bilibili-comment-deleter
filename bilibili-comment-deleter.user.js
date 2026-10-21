@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.38
+// @version      2.2.39
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.38';
+  const VERSION = '2.2.39';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -402,6 +402,7 @@
     let page = 1;
     let aicuUrl = AICU_APIS[0];
     let total = 0;
+    let got = 0;
     let hop = '';
     const spent = () => fmtDur(Date.now() - t0);
 
@@ -437,6 +438,7 @@
       if (page === 1) {
         total = (data.data && data.data.cursor && data.data.cursor.all_count) || 0;
         log(total ? `AICU 索引共 ${total} 条，开始拉取` : 'AICU 未给出总数，开始拉取');
+        log('AICU 是第三方索引：已删的可能还在，刚发的可能没有。删除仍走官方接口。', 'warn');
       }
 
       const replies = (data.data && data.data.replies) || [];
@@ -444,7 +446,7 @@
 
       let added = 0;
       for (const it of replies) {
-        if (addIfAbsent(mapAicuReply(it))) added++;
+        if (addIfAbsent(mapAicuReply(it))) { added++; got++; }
       }
       hop = '';
       const host = aicuUrl === AICU_APIS[0] ? '主接口' : '备用接口';
@@ -460,6 +462,7 @@
       page++;
       await sleep(AICU_DELAY);
     }
+    return { total, got };
     } finally { stopBeat(); }
   }
 
@@ -997,7 +1000,7 @@
       </div>
       <div class="${P}-sec">
         <div class="${P}-row">
-          <button class="${P}-btn ${P}-btn-p" id="${P}-load" title="通过第三方 aicu 索引拉取全部评论（推荐首选）">📥 AICU 获取</button>
+          <button class="${P}-btn ${P}-btn-p" id="${P}-load" title="第三方索引，不是官方实时列表。已删的可能还在，刚发的可能没有。删除仍走官方接口">📥 AICU 获取</button>
           <button class="${P}-btn" id="${P}-hist" title="翻观看历史，逐视频扫自己的评论。不是全量：只扫下面页数，并且最多 ${HISTORY_VIDEO_CAP} 个视频">🏛️ 官方历史</button>
           <span style="color:var(--c-sub);font-size:12px">每视频</span>
           <input class="${P}-input" type="number" id="${P}-scanpages" value="${Math.max(1, Math.min(10, Number(localStorage.getItem(`${P}_scanpages`)) || VIDEO_SCAN_PAGES_DEFAULT))}" min="1" max="10" step="1" title="每个视频只扫最近这么多页。默认 2。调大更慢，也更不容易漏掉较早的评论">
@@ -1610,10 +1613,11 @@
       log(`开始 AICU 枚举 UID=${myUid}`);
       datasetUid = myUid;
       const t0 = Date.now();
-      await fetchAicuComments(myUid);
+      const aicu = await fetchAicuComments(myUid) || { total: 0, got: 0 };
       renderList(); updCount();
       const aicuHead = aborted ? '已停止枚举' : '✅ AICU 枚举完成';
-      const aicuSum = `${aicuHead}：累计 ${comments.length} 条（去重）。用时 ${fmtDur(Date.now() - t0)}。${aborted ? '后面的页没有继续。' : ''}${digestLine()}`;
+      const gap = (!aborted && aicu.total && aicu.got !== aicu.total) ? `索引报 ${aicu.total}，本次收下 ${aicu.got}。` : '';
+      const aicuSum = `${aicuHead}：累计 ${comments.length} 条（去重）。${gap}索引可能滞后，不是官方实时列表。用时 ${fmtDur(Date.now() - t0)}。${aborted ? '后面的页没有继续。' : ''}${digestLine()}`;
       saveLastRun(aicuSum);
       setStatus(aicuSum);
       log(`${aicuHead}，累计 ${comments.length} 条`, aborted ? 'warn' : 'ok');
