@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.27
+// @version      2.2.28
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.27';
+  const VERSION = '2.2.28';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -512,6 +512,58 @@
     return { ok: true, msg: `导入完成：新增 ${added}，重复 ${dup}，无效 ${invalid}${extra}` };
   }
 
+  function parseCsv(text) {
+    const rows = [];
+    let row = [];
+    let cell = '';
+    let quoted = false;
+    const s = String(text || '').replace(/^\uFEFF/, '');
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if (quoted) {
+        if (ch === '"') {
+          if (s[i + 1] === '"') { cell += '"'; i++; }
+          else quoted = false;
+        } else cell += ch;
+      } else if (ch === '"') quoted = true;
+      else if (ch === ',') { row.push(cell); cell = ''; }
+      else if (ch === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
+      else if (ch !== '\r') cell += ch;
+    }
+    if (cell.length || row.length) { row.push(cell); rows.push(row); }
+    return rows.filter((r) => r.some((c) => String(c).trim()));
+  }
+
+  function importCsv(raw) {
+    const rows = parseCsv(raw);
+    if (rows.length < 2) return { ok: false, msg: 'CSV 至少需要表头和一行数据。' };
+    const head = rows[0].map((h) => String(h).trim());
+    const at = (name) => head.indexOf(name);
+    if (at('rpid') < 0 || at('oid') < 0 || at('type') < 0) {
+      return { ok: false, msg: 'CSV 需要 rpid、oid、type 列。请用本工具导出的表。' };
+    }
+    const col = (cols, name) => {
+      const i = at(name);
+      return i >= 0 ? cols[i] : '';
+    };
+    const replies = rows.slice(1).map((cols) => ({
+      rpid: col(cols, 'rpid'),
+      oid: col(cols, 'oid'),
+      type: col(cols, 'type'),
+      message: col(cols, 'message'),
+      ctime: col(cols, 'ctime'),
+      root: col(cols, 'root'),
+      state: col(cols, 'state'),
+    }));
+    return importJson(JSON.stringify(replies));
+  }
+
+  function importAny(raw) {
+    if (raw.startsWith('[') || raw.startsWith('{')) return importJson(raw);
+    if (/^"?rpid"?\s*,/i.test(raw)) return importCsv(raw);
+    return importJson(raw);
+  }
+
   /* ═══════════ 删除 + 回查 ═══════════ */
   async function doDelete(c, csrf) {
     const attempt = async (withRoot) => {
@@ -874,11 +926,11 @@
           <button class="${P}-btn" id="${P}-stop" style="display:none">⏹ 停止</button>
         </div>
         <div class="${P}-row" style="margin-top:7px">
-          <textarea class="${P}-ta" id="${P}-ta" placeholder="离线兜底：粘贴 aicu 导出的 JSON（含 replies 数组均可）"></textarea>
+          <textarea class="${P}-ta" id="${P}-ta" placeholder="离线兜底：粘贴 JSON，或本工具导出的 CSV"></textarea>
         </div>
         <div class="${P}-row" style="margin-top:4px">
           <button class="${P}-btn" id="${P}-import">📋 导入 JSON</button>
-          <span class="${P}-hint">aicu 不可用时：在其网页导出后手动粘贴</span>
+          <span class="${P}-hint">aicu 的 JSON，或本工具导出的 CSV，都可以粘贴</span>
         </div>
       </div>
       <div class="${P}-sec" id="${P}-cfg">
@@ -927,7 +979,7 @@
         </div>
       </div>
       <div class="${P}-list" id="${P}-list">
-        <div class="${P}-empty">三选一：AICU 全量获取 / 官方历史扫描 / 粘贴 JSON 导入</div>
+        <div class="${P}-empty">三选一：AICU 全量获取 / 官方历史扫描 / 粘贴 JSON 或 CSV</div>
       </div>
       <div class="${P}-barwrap" id="${P}-prog" style="display:none">
         <div class="${P}-bar"><div class="${P}-fill" id="${P}-fill"></div></div>
@@ -1494,8 +1546,8 @@
 
   function onImport() {
     const raw = document.getElementById(`${P}-ta`).value.trim();
-    if (!raw) { setStatus('请先粘贴 JSON 内容。'); return; }
-    const r = importJson(raw);
+    if (!raw) { setStatus('请先粘贴 JSON 或 CSV。'); return; }
+    const r = importAny(raw);
     renderList();
     setStatus(r.ok ? `✅ ${r.msg}（来源标记：导入）。${digestLine()}` : `❌ ${r.msg}`);
     log(r.ok ? `导入: ${r.msg}` : `导入失败: ${r.msg}`, r.ok ? 'ok' : 'err');
