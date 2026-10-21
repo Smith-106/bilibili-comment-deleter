@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.157
+// @version      2.2.158
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.157';
+  const VERSION = '2.2.158';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1639,7 +1639,7 @@
       </div>
       <div class="${P}-strip">
         <div class="r">
-          <input class="${P}-input w" type="text" id="${P}-kw" placeholder="正文，或至少 4 位编号">
+          <input class="${P}-input w" type="text" id="${P}-kw" placeholder="正文、编号，或 rpid:123 / oid:123">
           <button class="${P}-btn" id="${P}-filter" style="padding:4px 10px">筛选</button>
           <button class="${P}-btn" id="${P}-clearf" style="padding:4px 10px">清除</button>
           <span class="${P}-cnt" id="${P}-cnt">0 条</span>
@@ -2101,21 +2101,26 @@
   }
 
   function idHit(c, q) {
-    const raw = String(q || '').trim().toLowerCase();
+    const raw = String(q || '').trim().toLowerCase().replace(/：/g, ':').replace(/，/g, ',');
     if (!raw) return [];
     const tagged = [];
-    const re = /(?:^|[\s,])(?:rpid|oid|av|cv|ep)\s*[:=]?\s*(\d+)/g;
+    const re = /(?:^|[\s,])(rpid|oid|av|cv|ep)\s*[:=]?\s*(\d+)/g;
     let m;
-    while ((m = re.exec(raw))) tagged.push(m[1]);
-    const needles = tagged.length ? tagged : [raw];
+    while ((m = re.exec(raw))) tagged.push({ field: m[1] === 'rpid' ? 'rpid' : 'oid', needle: m[2] });
     const rpid = String(c.rpid);
     const oid = String(c.oid || '').toLowerCase();
     const hits = [];
-    for (const needle of needles) {
+    const take = (field, needle) => {
       const wide = [...needle].length >= 4;
-      if (!hits.includes('rpid') && (wide ? rpid.includes(needle) : rpid === needle)) hits.push('rpid');
-      if (!hits.includes('oid') && (wide ? oid.includes(needle) : oid === needle)) hits.push('oid');
+      const value = field === 'rpid' ? rpid : oid;
+      if (!hits.includes(field) && (wide ? value.includes(needle) : value === needle)) hits.push(field);
+    };
+    if (tagged.length) {
+      for (const tag of tagged) take(tag.field, tag.needle);
+      return hits;
     }
+    take('rpid', raw);
+    take('oid', raw);
     return hits;
   }
   function reasonHit(c, q) {
