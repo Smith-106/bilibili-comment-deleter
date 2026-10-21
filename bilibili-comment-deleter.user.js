@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.63
+// @version      2.2.64
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.63';
+  const VERSION = '2.2.64';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -405,11 +405,13 @@
     let got = 0;
     let hop = '';
     const spent = () => fmtDur(Date.now() - t0);
+    const before = comments.length;
+    const fresh = () => comments.length - before;
 
     try {
     while (true) {
       if (aborted) break;
-      startBeat(() => `${hop ? hop + ' · ' : ''}枚举第 ${page} 页请求中 · 累计 ${comments.length}${total ? '/' + total : ''} · 已用 ${spent()}`);
+      startBeat(() => `${hop ? hop + ' · ' : ''}枚举第 ${page} 页请求中 · 这次 +${fresh()}${total ? '/' + total : ''} · 已用 ${spent()}`);
       const url = `${aicuUrl}?uid=${encodeURIComponent(uid)}&pn=${page}&ps=${AICU_PS}&mode=0`;
       let data;
       try {
@@ -451,14 +453,14 @@
       hop = '';
       const host = aicuUrl === AICU_APIS[0] ? '主接口' : '备用接口';
       const skipped = replies.length - added;
-      log(`第 ${page} 页（${host}）: +${added} 条（累计 ${comments.length}${total ? '/' + total : ''}）`, 'info');
+      log(`第 ${page} 页（${host}）: +${added} 条（这次 +${fresh()}${total ? '/' + total : ''}）`, 'info');
       touchList(true);
-      if (total) setProg(Math.min(comments.length, total), total, '枚举');
+      if (total) setProg(Math.min(fresh(), total), total, '枚举');
 
       if (data.data && data.data.cursor && data.data.cursor.is_end) break;
       const waitUntil = Date.now() + AICU_DELAY;
       const donePage = page;
-      startBeat(() => `第 ${donePage} 页完成 · ${host} · 累计 ${comments.length}${total ? '/' + total : ''} · 本页 +${added}${skipped ? ` · 跳过 ${skipped}` : ''} · ${Math.max(0, Math.ceil((waitUntil - Date.now()) / 1000))}s 后下一页 · 已用 ${spent()}`);
+      startBeat(() => `第 ${donePage} 页完成 · ${host} · 这次 +${fresh()}${total ? '/' + total : ''} · 本页 +${added}${skipped ? ` · 跳过 ${skipped}` : ''} · ${Math.max(0, Math.ceil((waitUntil - Date.now()) / 1000))}s 后下一页 · 已用 ${spent()}`);
       page++;
       await sleep(AICU_DELAY);
     }
@@ -476,6 +478,8 @@
     let viewAt = 0;
     const seenAids = new Set();
     let guard = 0;
+    const before = comments.length;
+    const fresh = () => comments.length - before;
 
     try {
     while (seenAids.size < HISTORY_VIDEO_CAP && guard < 400) {
@@ -506,7 +510,7 @@
     for (let hi = 0; hi < aids.length; hi++) {
       if (aborted) break;
       const aid = aids[hi];
-      startBeat(() => `扫描视频 ${hi + 1}/${aids.length} · 已找到 ${comments.length} 条 · 已用 ${spent()}${videoFail ? ` · 失败 ${videoFail}` : ''}`);
+      startBeat(() => `扫描视频 ${hi + 1}/${aids.length} · 这次 +${fresh()} · 列表 ${comments.length} 条 · 已用 ${spent()}${videoFail ? ` · 失败 ${videoFail}` : ''}`);
       touchList(false);
       setProg(hi, aids.length, '扫描');
       let videoNote = '';
@@ -518,10 +522,10 @@
       }
       const waitUntil = Date.now() + HISTORY_VIDEO_DELAY;
       const doneAt = hi + 1;
-      startBeat(() => `${videoNote || `视频 ${doneAt}/${aids.length} 完成`} · ${Math.max(0, Math.ceil((waitUntil - Date.now()) / 1000))}s 后下一个 · 已找到 ${comments.length} 条 · 已用 ${spent()}${videoFail ? ` · 失败 ${videoFail}` : ''}`);
+      startBeat(() => `${videoNote || `视频 ${doneAt}/${aids.length} 完成`} · ${Math.max(0, Math.ceil((waitUntil - Date.now()) / 1000))}s 后下一个 · 这次 +${fresh()} · 列表 ${comments.length} 条 · 已用 ${spent()}${videoFail ? ` · 失败 ${videoFail}` : ''}`);
       await sleep(HISTORY_VIDEO_DELAY);
     }
-    log(`官方历史扫描结束，本来源新增 ${comments.filter((c) => c.src === 'history').length} 条${videoFail ? `，${videoFail} 个视频失败` : ''}`, videoFail ? 'warn' : 'ok');
+    log(`官方历史扫描结束，这次 +${fresh()}，列表共 ${comments.length} 条${videoFail ? `，${videoFail} 个视频失败` : ''}`, videoFail ? 'warn' : 'ok');
     } finally { stopBeat(); }
   }
 
