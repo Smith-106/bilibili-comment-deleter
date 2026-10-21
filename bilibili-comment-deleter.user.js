@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.66
+// @version      2.2.67
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.66';
+  const VERSION = '2.2.67';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -521,6 +521,10 @@
       if (typeof c.max !== 'number' || typeof c.view_at !== 'number') break;
       cursorMax = c.max; viewAt = c.view_at;
       await sleep(800);
+    }
+    if (!historyStop && !aborted && seenAids.size < HISTORY_VIDEO_CAP && guard >= 400) {
+      historyStop = '历史翻了 400 页还没到头，更早的视频没翻到。';
+      log(historyStop, 'warn');
     }
 
     const capNote = seenAids.size >= HISTORY_VIDEO_CAP ? `，已到 ${HISTORY_VIDEO_CAP} 个上限，更早的视频没翻` : '';
