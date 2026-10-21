@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.156
+// @version      2.2.157
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.156';
+  const VERSION = '2.2.157';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -557,6 +557,20 @@
     if (chars.length <= 200) return { message: full, cut: false };
     return { message: chars.slice(0, 200).join(''), cut: true };
   }
+  function emoteLabel(it) {
+    const content = (it && it.content) || {};
+    const emote = content.emote && typeof content.emote === 'object' && !Array.isArray(content.emote)
+      ? content.emote
+      : (it && it.emote && typeof it.emote === 'object' && !Array.isArray(it.emote) ? it.emote : null);
+    if (!emote) return '';
+    const names = [];
+    for (const key of Object.keys(emote)) {
+      const raw = emote[key];
+      const name = raw && raw.text != null && String(raw.text).trim() ? String(raw.text).trim() : String(key).trim();
+      if (name && !names.includes(name)) names.push(name);
+    }
+    return names.join('');
+  }
   function replyText(it) {
     if (!it) return '';
     let text = '';
@@ -566,7 +580,8 @@
     const content = it.content || {};
     const pics = Array.isArray(content.pictures) ? content.pictures.length
       : (Array.isArray(it.pictures) ? it.pictures.length : 0);
-    return pics ? `[图片${pics}张]` : '';
+    if (pics) return `[图片${pics}张]`;
+    return emoteLabel(it);
   }
 
   /** aicu 条目、原始单页，或本工具自己导出的扁对象 → 规范对象 */
