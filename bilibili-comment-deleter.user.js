@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.106
+// @version      2.2.107
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.106';
+  const VERSION = '2.2.107';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -821,7 +821,8 @@
     const srcNote = keptSrc && added > keptSrc
       ? `，沿用原来源 ${keptSrc}，其余新行标为导入`
       : keptSrc ? `，沿用原来源 ${keptSrc}` : (added ? '，新行标为导入' : '');
-    return { ok: true, msg: `导入完成：新增 ${added}，重复 ${dup}，无效 ${invalid}${fillNote}${srcNote}${extra}${scopeNote}` };
+    const warn = !!(invalid || rootClash || placeClash || srcClash || partial);
+    return { ok: true, warn, msg: `导入完成：新增 ${added}，重复 ${dup}，无效 ${invalid}${fillNote}${srcNote}${extra}${scopeNote}` };
   }
 
   function parseCsv(text) {
@@ -865,6 +866,7 @@
       message: col(cols, 'message'),
       ctime: col(cols, 'ctime'),
       root: col(cols, 'root'),
+      src: col(cols, 'src'),
       state: col(cols, 'state'),
       cut: col(cols, 'cut'),
       placeClash: col(cols, 'placeClash'),
@@ -2151,7 +2153,7 @@
     renderList();
     if (r.ok) document.getElementById(`${P}-ta`).value = '';
     setStatus(r.ok ? `✅ ${r.msg}。输入框已清空，避免再导入同一份。${digestLine()}` : `❌ ${r.msg}`);
-    log(r.ok ? `导入: ${r.msg}` : `导入失败: ${r.msg}`, r.ok ? 'ok' : 'err');
+    log(r.ok ? `导入: ${r.msg}` : `导入失败: ${r.msg}`, !r.ok ? 'err' : r.warn ? 'warn' : 'ok');
   }
 
   function lockWhileDeleting(locked) {
