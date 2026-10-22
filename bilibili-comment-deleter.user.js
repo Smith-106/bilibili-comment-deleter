@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.168
+// @version      2.2.169
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.168';
+  const VERSION = '2.2.169';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -95,20 +95,21 @@
     try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; }
   }
 
-  function fmtEta(ms) {
-    const s = Math.max(0, Math.round(ms / 1000));
-    if (s < 60) return `约 ${s} 秒`;
+  function fmtSpan(ms, approx) {
+    const n = Number(ms);
+    if (!Number.isFinite(n)) return '时间未知';
+    const s = Math.max(0, Math.round(n / 1000));
+    const head = approx ? '约 ' : '';
+    if (s < 60) return `${head}${s} 秒`;
     const m = Math.floor(s / 60);
     const r = s % 60;
-    return r ? `约 ${m} 分 ${r} 秒` : `约 ${m} 分`;
+    if (m < 60) return r ? `${head}${m} 分 ${r} 秒` : `${head}${m} 分`;
+    const h = Math.floor(m / 60);
+    const rm = m % 60;
+    return rm ? `${head}${h} 小时 ${rm} 分` : `${head}${h} 小时`;
   }
-  function fmtDur(ms) {
-    const s = Math.max(0, Math.round(ms / 1000));
-    if (s < 60) return `${s} 秒`;
-    const m = Math.floor(s / 60);
-    const r = s % 60;
-    return r ? `${m} 分 ${r} 秒` : `${m} 分`;
-  }
+  function fmtEta(ms) { return fmtSpan(ms, true); }
+  function fmtDur(ms) { return fmtSpan(ms, false); }
   function fmtAgo(ms) {
     const s = Math.max(0, Math.round(ms / 1000));
     if (s < 60) return `${s} 秒`;
