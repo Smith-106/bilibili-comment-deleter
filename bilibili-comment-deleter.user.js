@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.166
+// @version      2.2.167
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.166';
+  const VERSION = '2.2.167';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -3165,14 +3165,21 @@
     lastListPaint = now;
     renderList();
   }
+  function busyPct(label) {
+    const s = String(label || '');
+    const split = s.match(/总进度\s*(\d+)%/);
+    if (split) return split[1] + '%';
+    const plain = s.match(/(\d+)%\s*\(\d+\/\d+\)/);
+    return plain ? plain[1] + '%' : '';
+  }
   function paintBusy(label) {
     const btn = document.getElementById(`${P}-toggle`);
     if (!savedTitle) savedTitle = document.title;
     if (label) {
       document.title = `${label} · ${savedTitle}`;
       if (btn) {
-        const pct = String(label).match(/(\d+)%\s*\(\d+\/\d+\)/);
-        if (pct) btn.dataset.pct = pct[1] + '%';
+        const pct = busyPct(label);
+        if (pct) btn.dataset.pct = pct;
         btn.dataset.busy = '1';
         btn.textContent = btn.dataset.pct || '…';
         btn.title = `${label}。点此打开面板`;
