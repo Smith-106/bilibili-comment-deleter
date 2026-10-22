@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.198
+// @version      2.2.199
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.198';
+  const VERSION = '2.2.199';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2337,6 +2337,19 @@
     take('oid', raw);
     return hits;
   }
+  function hasIdTag(q) {
+    const raw = String(q || '').trim().toLowerCase().replace(/：/g, ':').replace(/，/g, ',');
+    return /(?:^|[\s,])(?:rpid|oid|av|cv|ep)\s*[:=]?\s*\d+/.test(raw);
+  }
+  function idQueryRest(q) {
+    const raw = String(q || '').trim().toLowerCase().replace(/：/g, ':').replace(/，/g, ',');
+    return raw.replace(/(?:^|[\s,])(?:rpid|oid|av|cv|ep)\s*[:=]?\s*\d+/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+  function restMatches(message, reason, rest) {
+    const folded = looseFold(rest);
+    if (!folded) return true;
+    return looseFold(message).includes(folded) || looseFold(reason).includes(folded);
+  }
   function looseFold(s) {
     return [...String(s || '')].filter((ch) => !/\s/.test(ch)).join('').toLowerCase();
   }
@@ -2381,7 +2394,10 @@
     if (filterKw) {
       const q = filterKw.toLowerCase();
       const msgQ = looseFold(q);
-      list = list.filter((c) => (msgQ && looseFold(c.message).includes(msgQ)) || idHit(c, q).length || reasonHit(c, q));
+      list = list.filter((c) => {
+        if (hasIdTag(q)) return idHit(c, q).length > 0 && restMatches(c.message, journalWhy(c.rpid), idQueryRest(q));
+        return (msgQ && looseFold(c.message).includes(msgQ)) || idHit(c, q).length || reasonHit(c, q);
+      });
     }
     if (filtSrc !== 'all') list = list.filter((c) => c.src === filtSrc);
     if (filtType !== 'all') list = list.filter((c) => String(c.type) === filtType);
@@ -2441,7 +2457,7 @@
     main.className = 'm';
     const msgDiv = document.createElement('div');
     msgDiv.className = `${P}-msg`;
-    if (c.message) appendQuery(msgDiv, c.message, filterKw);
+    if (c.message) appendQuery(msgDiv, c.message, hasIdTag(filterKw) ? idQueryRest(filterKw) : filterKw);
     else msgDiv.textContent = '(空评论)';
     if (c.cut) {
       msgDiv.appendChild(document.createTextNode('…'));
