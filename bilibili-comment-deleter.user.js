@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.193
+// @version      2.2.194
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.193';
+  const VERSION = '2.2.194';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2215,6 +2215,61 @@
     return bits;
   }
 
+  function presentValues(rows, field) {
+    const out = [];
+    for (const c of rows || []) {
+      const v = c && c[field];
+      if (v || v === 0) out.push(v);
+    }
+    return out;
+  }
+  function selectOptions(current, present, known, labelOf) {
+    const values = [];
+    const seen = new Set(['all']);
+    const add = (v) => {
+      const key = String(v);
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      values.push(key);
+    };
+    for (const v of known || []) add(v);
+    const extra = [];
+    for (const v of present || []) {
+      const key = String(v);
+      if (key && !seen.has(key)) extra.push(key);
+    }
+    extra.sort();
+    for (const key of extra) add(key);
+    if (current && current !== 'all') add(current);
+    return [{ value: 'all', label: '全部' }].concat(values.map((v) => ({ value: v, label: labelOf(v) })));
+  }
+  function fillSelect(el, options, current) {
+    if (!el) return;
+    const want = options.map((o) => `${o.value}=${o.label}`).join('\n');
+    const have = [...el.options].map((o) => `${o.value}=${o.textContent}`).join('\n');
+    const cur = String(current || 'all');
+    if (have === want && el.value === cur) return;
+    el.innerHTML = '';
+    for (const opt of options) {
+      const o = document.createElement('option');
+      o.value = opt.value;
+      o.textContent = opt.label;
+      if (opt.value === cur) o.selected = true;
+      el.appendChild(o);
+    }
+  }
+  function syncChoiceLists() {
+    fillSelect(
+      document.getElementById(`${P}-srcsel`),
+      selectOptions(filtSrc, presentValues(comments, 'src'), ['aicu', 'history', 'import', 'manual'], (v) => SRC_TEXT[v] || v),
+      filtSrc
+    );
+    fillSelect(
+      document.getElementById(`${P}-typesel`),
+      selectOptions(filtType, presentValues(comments, 'type'), ['1', '11', '12', '17', '21'], (v) => typeText(v)),
+      filtType
+    );
+  }
   function syncFilterControls() {
     const kw = document.getElementById(`${P}-kw`);
     if (kw && kw.value !== filterKw) kw.value = filterKw;
@@ -2499,6 +2554,7 @@
   function renderList() {
     const listEl = document.getElementById(`${P}-list`);
     if (!listEl) return;
+    syncChoiceLists();
     const keep = listEl.scrollTop;
     if (ro) { ro.disconnect(); ro = null; }
     viewSnap = visibleComments();
