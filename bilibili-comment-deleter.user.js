@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.189
+// @version      2.2.190
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.189';
+  const VERSION = '2.2.190';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1816,9 +1816,8 @@
       }
       saveSettings();
       refreshLogCopyTitle();
-      if (!hidden && !shown) setStatus(logOnlyBad ? '只看问题：日志是空的。' : '日志是空的。');
-      else if (logOnlyBad) setStatus(hidden ? `只看问题：藏起 ${hidden} 行，还显示 ${shown} 行。` : '只看问题：当前没有要藏的行。');
-      else setStatus(`已显示全部 ${shown} 行日志。`);
+      const trimmed = !!box.querySelector(`.${P}-log-trim`);
+      setStatus(logToggleNote(logOnlyBad, hidden, shown, trimmed));
     };
     $el(`${P}-logcopy`).onclick = async () => {
       const box = $el(`${P}-log`);
@@ -3197,6 +3196,15 @@
     }
     if (stick) el.scrollTop = el.scrollHeight;
     if (trimmed) refreshLogCopyTitle();
+  }
+  function logToggleNote(onlyBad, hidden, shown, trimmed) {
+    if (!hidden && !shown) return onlyBad ? '只看问题：日志是空的。' : '日志是空的。';
+    const older = trimmed ? '更早的行已经省略。' : '';
+    if (onlyBad) {
+      const body = hidden ? `只看问题：藏起 ${hidden} 行，还显示 ${shown} 行。` : '只看问题：当前没有要藏的行。';
+      return `${body}${older}`;
+    }
+    return older ? `已显示剩下的 ${shown} 行日志。${older}` : `已显示全部 ${shown} 行日志。`;
   }
   function refreshLogCopyTitle() {
     const btn = document.getElementById(`${P}-logcopy`);
