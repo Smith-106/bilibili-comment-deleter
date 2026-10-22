@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.199
+// @version      2.2.200
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.199';
+  const VERSION = '2.2.200';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2744,6 +2744,11 @@
     const count = `当前 ${Number(n) || 0} 条。`;
     const rest = aside ? String(aside) : '';
     if (!query) return `已清除关键词。${count}${rest}`;
+    if (hasIdTag(query)) {
+      const extra = idQueryRest(query);
+      const tail = extra ? `编号要对上，并且正文或失败原因里要有「${extra}」。` : '只按这个编号。';
+      return `已按「${query}」筛选，${count}${tail}${rest}`;
+    }
     const idPart = [...query].length < 4 ? '编号不满 4 位要完全相等。' : '也搜 rpid 和 oid。';
     return `已按「${query}」筛选，${count}正文和失败原因忽略空格和换行。${idPart}${rest}`;
   }
