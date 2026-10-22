@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.170
+// @version      2.2.171
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.170';
+  const VERSION = '2.2.171';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1870,20 +1870,23 @@
     $el(`${P}-retry`).onclick = () => {
       const targets = badInList();
       if (!targets.length) { setStatus('当前列表里没有未成功、且能删除的条目。'); return; }
-      runDelete('explicit', targets, '重试未成功');
+      const hidden = outsideCount(targets, visibleComments());
+      runDelete('explicit', targets, hidden ? `重试未成功（含筛选外 ${hidden} 条）` : '重试未成功');
     };
     $el(`${P}-retry`).style.display = 'none';
     $el(`${P}-copybad`).onclick = async () => {
       const jm = journalMap();
-      const ids = comments.filter((c) => {
+      const rows = comments.filter((c) => {
         const st = jm.get(idExact(c.rpid));
         return st === 'fail' || st === 'uncertain';
-      }).map((c) => `${c.rpid}\t${journalWhy(c.rpid)}`);
-      if (!ids.length) { setStatus('没有未成功的 rpid 可复制。'); return; }
+      });
+      if (!rows.length) { setStatus('没有未成功的 rpid 可复制。'); return; }
+      const ids = rows.map((c) => `${c.rpid}\t${journalWhy(c.rpid)}`);
       const text = ids.join('\n');
       try {
         await navigator.clipboard.writeText(text);
-        setStatus(`已复制 ${ids.length} 个未成功 rpid（每行后面是原因，没有原因就空着）。`);
+        const hidden = outsideCount(rows, visibleComments());
+        setStatus(`已复制 ${ids.length} 个未成功 rpid（每行后面是原因，没有原因就空着）${hidden ? `，其中 ${hidden} 条不在当前筛选里` : ''}。`);
       } catch (e) {
         setStatus('复制失败。请允许剪贴板，或从日志里复制。');
         log(`未成功 rpid：${ids.join(',')}`, 'warn');
@@ -2424,6 +2427,17 @@
     listEl.scrollTop = keep;
   }
 
+  function outsideCount(rows, visible) {
+    const ids = new Set((visible || []).map((c) => c.rpid));
+    let n = 0;
+    for (const c of rows || []) if (!ids.has(c.rpid)) n++;
+    return n;
+  }
+  function scopedCountLabel(prefix, total, hidden) {
+    if (!total) return prefix;
+    if (hidden > 0) return `${prefix} (${total}，含筛选外)`;
+    return `${prefix} (${total})`;
+  }
   function countDeletable(list, skipOk, stateOf) {
     const rows = list || [];
     if (!skipOk) return rows.length;
@@ -2467,19 +2481,23 @@
     }
     const copyBtn = document.getElementById(`${P}-copybad`);
     if (copyBtn) {
-      let bad = 0;
+      const copyRows = [];
       for (const c of comments) {
         const st = jm.get(idExact(c.rpid));
-        if (st === 'fail' || st === 'uncertain') bad++;
+        if (st === 'fail' || st === 'uncertain') copyRows.push(c);
       }
-      copyBtn.style.display = bad && !deleting && !confirming ? 'inline-block' : 'none';
-      copyBtn.textContent = `复制未成功 (${bad})`;
+      const hiddenCopy = outsideCount(copyRows, shown);
+      copyBtn.style.display = copyRows.length && !deleting && !confirming ? 'inline-block' : 'none';
+      copyBtn.textContent = scopedCountLabel('复制未成功', copyRows.length, hiddenCopy);
+      copyBtn.title = hiddenCopy ? `复制整份列表里的未成功，其中 ${hiddenCopy} 条不在当前筛选里。` : '';
     }
     const retryBtn = document.getElementById(`${P}-retry`);
     if (retryBtn) {
-      const nRetry = badInList().length;
-      retryBtn.style.display = nRetry && !deleting && !confirming ? 'inline-block' : 'none';
-      retryBtn.textContent = `↻ 重试未成功 (${nRetry})`;
+      const retryRows = badInList();
+      const hiddenRetry = outsideCount(retryRows, shown);
+      retryBtn.style.display = retryRows.length && !deleting && !confirming ? 'inline-block' : 'none';
+      retryBtn.textContent = scopedCountLabel('↻ 重试未成功', retryRows.length, hiddenRetry);
+      retryBtn.title = hiddenRetry ? `重试整份列表里能删除的未成功，其中 ${hiddenRetry} 条不在当前筛选里。` : '';
     }
     const cnt = document.getElementById(`${P}-cnt`);
     if (cnt) {
