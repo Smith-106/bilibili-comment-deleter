@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.184
+// @version      2.2.185
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.184';
+  const VERSION = '2.2.185';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1687,7 +1687,7 @@
           <button class="${P}-btn ${P}-btn-p" id="${P}-load" title="第三方索引，不是官方实时列表。已删的可能还在，刚发的可能没有。删除仍走官方接口">📥 AICU 获取</button>
           <button class="${P}-btn" id="${P}-hist" title="翻观看历史，逐视频扫自己的评论。不是全量：只扫下面页数，最多 ${HISTORY_VIDEO_CAP} 个视频。楼中楼先看预览；回复比预览多的楼，每视频最多再补 ${HISTORY_THREAD_OPEN_MAX} 条楼的第一页，名额先给预览里没有自己的楼">🏛️ 官方历史</button>
           <span style="color:var(--c-sub);font-size:12px">每视频</span>
-          <input class="${P}-input" type="number" id="${P}-scanpages" value="${Math.max(1, Math.min(10, Number(localStorage.getItem(`${P}_scanpages`)) || VIDEO_SCAN_PAGES_DEFAULT))}" min="1" max="10" step="1" title="每个视频只扫最近这么多页。默认 2。调大更慢，也更不容易漏掉较早的评论">
+          <input class="${P}-input" type="number" id="${P}-scanpages" value="${Math.max(1, Math.min(10, Number(localStorage.getItem(`${P}_scanpages`)) || VIDEO_SCAN_PAGES_DEFAULT))}" min="1" max="10" step="1" title="每个视频只扫最近这么多页。默认 ${VIDEO_SCAN_PAGES_DEFAULT}。超出 1 到 10 会改到边界，空的或不是数字会改回默认。调大更慢，也更不容易漏掉较早的评论">
           <span style="color:var(--c-sub);font-size:12px">页</span>
           <button class="${P}-btn" id="${P}-stop" style="display:none">⏹ 停止</button>
         </div>
@@ -1706,7 +1706,7 @@
           <button class="${P}-btn ${P}-retry" id="${P}-retry">↻ 重试未成功</button>
           <button class="${P}-btn ${P}-retry" id="${P}-copybad" type="button">复制未成功</button>
           <span style="color:var(--c-sub);font-size:12px">间隔</span>
-          <input class="${P}-input" type="number" id="${P}-delay" value="${DELAY_DEFAULT}" min="200" max="5000" step="50" title="两条删除之间的间隔，200 到 5000 毫秒。超出范围会改回边界">
+          <input class="${P}-input" type="number" id="${P}-delay" value="${DELAY_DEFAULT}" min="200" max="5000" step="50" title="两条删除之间的间隔，200 到 5000 毫秒。超出范围会改到边界，空的或不是数字会改回 ${DELAY_DEFAULT}">
           <span style="color:var(--c-sub);font-size:12px">ms</span>
         </div>
         <label><input type="checkbox" id="${P}-recheck" checked title="关掉之后，接口受理的只记为待确认，不算已删。下次删除才生效。"> 删除后官方单条确认（不信 code=0；仍在则自动降速重试）</label>
@@ -3183,25 +3183,43 @@
       return c.oid && c.type && (st === 'fail' || st === 'uncertain');
     });
   }
+  function boundInt(raw, min, max, fallback) {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return { n: fallback, fixed: 'empty' };
+    if (n < min) return { n: min, fixed: 'range' };
+    if (n > max) return { n: max, fixed: 'range' };
+    return { n, fixed: '' };
+  }
+  function boundNote(got, okText, rangeText, emptyText) {
+    if (!got || got.fixed === 'empty') return emptyText;
+    if (got.fixed === 'range') return rangeText;
+    return okText;
+  }
   function readDelay(announce) {
     const el = document.getElementById(`${P}-delay`);
-    const raw = parseInt(el && el.value, 10);
-    const n = Math.max(200, Math.min(5000, raw || DELAY_DEFAULT));
-    const clamped = Number.isFinite(raw) && raw !== n;
-    if (el && el.value !== String(n)) el.value = String(n);
-    if (announce || clamped) saveSettings();
-    if (announce) say(clamped ? `间隔已改成 ${n} 毫秒。允许 200 到 5000。下次删除用这个。` : `间隔 ${n} 毫秒。下次删除用这个。`);
-    return n;
+    const got = boundInt(parseInt(el && el.value, 10), 200, 5000, DELAY_DEFAULT);
+    if (el && el.value !== String(got.n)) el.value = String(got.n);
+    if (announce || got.fixed) saveSettings();
+    if (announce) say(boundNote(
+      got,
+      `间隔 ${got.n} 毫秒。下次删除用这个。`,
+      `间隔已改成 ${got.n} 毫秒。允许 200 到 5000。下次删除用这个。`,
+      `间隔不是有效数字，改回 ${got.n} 毫秒。下次删除用这个。`
+    ));
+    return got.n;
   }
   function readScanPages(announce) {
     const el = document.getElementById(`${P}-scanpages`);
-    const raw = parseInt(el && el.value, 10);
-    const n = Math.max(1, Math.min(10, raw || VIDEO_SCAN_PAGES_DEFAULT));
-    const clamped = Number.isFinite(raw) && raw !== n;
-    if (el && el.value !== String(n)) el.value = String(n);
-    try { localStorage.setItem(`${P}_scanpages`, String(n)); } catch (e) { /* 记不住就用这一次的值 */ }
-    if (announce) say(clamped ? `每个视频已改成 ${n} 页。允许 1 到 10。下次扫描用这个。` : `每个视频扫 ${n} 页。下次扫描用这个。`);
-    return n;
+    const got = boundInt(parseInt(el && el.value, 10), 1, 10, VIDEO_SCAN_PAGES_DEFAULT);
+    if (el && el.value !== String(got.n)) el.value = String(got.n);
+    try { localStorage.setItem(`${P}_scanpages`, String(got.n)); } catch (e) { /* 记不住就用这一次的值 */ }
+    if (announce) say(boundNote(
+      got,
+      `每个视频扫 ${got.n} 页。下次扫描用这个。`,
+      `每个视频已改成 ${got.n} 页。允许 1 到 10。下次扫描用这个。`,
+      `页数不是有效数字，改回 ${got.n} 页。下次扫描用这个。`
+    ));
+    return got.n;
   }
   function paintStatus(t) { const el = document.getElementById(`${P}-status`); if (el) el.textContent = t; }
   function setStatus(t) {
