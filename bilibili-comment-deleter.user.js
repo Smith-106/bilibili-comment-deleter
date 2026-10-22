@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.200
+// @version      2.2.201
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.200';
+  const VERSION = '2.2.201';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -2383,6 +2383,21 @@
     const why = journalWhy(c && c.rpid);
     return why && looseFold(why).includes(needle) ? why : '';
   }
+  function keywordMarkOf(message, why, ids, q) {
+    const found = ids || [];
+    if (hasIdTag(q)) {
+      if (!found.length) return { ids: [], why: '' };
+      const rest = idQueryRest(q);
+      if (!rest) return { ids: found, why: '' };
+      if (restMatches(message, '', rest)) return { ids: found, why: '' };
+      if (restMatches('', why, rest)) return { ids: found, why: why || '' };
+      return { ids: found, why: '' };
+    }
+    const folded = looseFold(q);
+    if (folded && looseFold(message).includes(folded)) return { ids: [], why: '' };
+    if (found.length) return { ids: found, why: '' };
+    return { ids: [], why: folded && looseFold(why).includes(folded) ? (why || '') : '' };
+  }
 
   function sortTime(c, desc) {
     const t = Number(c && c.ctime) || 0;
@@ -2505,20 +2520,18 @@
     }
     if (filterKw) {
       const q = filterKw.toLowerCase();
-      const inMsg = !!(looseFold(q) && looseFold(c.message).includes(looseFold(q)));
-      const hits = inMsg ? [] : idHit(c, q);
-      if (hits.length) {
+      const marks = keywordMarkOf(c.message, journalWhy(c.rpid), idHit(c, q), q);
+      if (marks.ids.length) {
         const hit = document.createElement('span');
         hit.className = `${P}-mark`;
-        hit.textContent = ` ·命中 ${hits.join('/')}`;
+        hit.textContent = ` ·命中 ${marks.ids.join('/')}`;
         meta.appendChild(hit);
       }
-      const whyHit = inMsg || hits.length ? '' : reasonHit(c, q);
-      if (whyHit) {
+      if (marks.why) {
         const hit = document.createElement('span');
         hit.className = `${P}-mark`;
         hit.textContent = ' ·命中原因';
-        hit.title = whyHit;
+        hit.title = marks.why;
         meta.appendChild(hit);
       }
     }
