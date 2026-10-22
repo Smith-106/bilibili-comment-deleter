@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.194
+// @version      2.2.195
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.194';
+  const VERSION = '2.2.195';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1723,7 +1723,7 @@
           <button class="${P}-btn ${P}-btn-p" id="${P}-load" title="第三方索引，不是官方实时列表。已删的可能还在，刚发的可能没有。删除仍走官方接口">📥 AICU 获取</button>
           <button class="${P}-btn" id="${P}-hist" title="翻观看历史，逐视频扫自己的评论。不是全量：只扫下面页数，最多 ${HISTORY_VIDEO_CAP} 个视频。楼中楼先看预览；回复比预览多的楼，每视频最多再补 ${HISTORY_THREAD_OPEN_MAX} 条楼的第一页，名额先给预览里没有自己的楼">🏛️ 官方历史</button>
           <span style="color:var(--c-sub);font-size:12px">每视频</span>
-          <input class="${P}-input" type="number" id="${P}-scanpages" value="${Math.max(1, Math.min(10, Number(localStorage.getItem(`${P}_scanpages`)) || VIDEO_SCAN_PAGES_DEFAULT))}" min="1" max="10" step="1" title="每个视频只扫最近这么多页。默认 ${VIDEO_SCAN_PAGES_DEFAULT}。超出 1 到 10 会改到边界，空的或不是数字会改回默认。调大更慢，也更不容易漏掉较早的评论">
+          <input class="${P}-input" type="number" id="${P}-scanpages" value="${storedBound(localStorage.getItem(`${P}_scanpages`), 1, 10, VIDEO_SCAN_PAGES_DEFAULT)}" min="1" max="10" step="1" title="每个视频只扫最近这么多页。默认 ${VIDEO_SCAN_PAGES_DEFAULT}。超出 1 到 10 会改到边界，空的或不是数字会改回默认。调大更慢，也更不容易漏掉较早的评论">
           <span style="color:var(--c-sub);font-size:12px">页</span>
           <button class="${P}-btn" id="${P}-stop" style="display:none">⏹ 停止</button>
         </div>
@@ -2078,7 +2078,7 @@
     /* —— 恢复设置 —— */
     try {
       const saved = JSON.parse(localStorage.getItem(P) || '{}');
-      if (saved.delay) $el(`${P}-delay`).value = saved.delay;
+      if (saved.delay != null && saved.delay !== '') $el(`${P}-delay`).value = storedBound(saved.delay, 200, 5000, DELAY_DEFAULT);
       if (saved.recheck === false) $el(`${P}-recheck`).checked = false;
       if (saved.skipOk === false) $el(`${P}-skipok`).checked = false;
       if (saved.theme === 'light') panel.setAttribute('data-theme', 'light');
@@ -2146,7 +2146,7 @@
     try {
       const panel = document.getElementById(`${P}-panel`);
       localStorage.setItem(P, JSON.stringify({
-        delay: parseInt(document.getElementById(`${P}-delay`).value, 10) || DELAY_DEFAULT,
+        delay: storedBound(document.getElementById(`${P}-delay`) && document.getElementById(`${P}-delay`).value, 200, 5000, DELAY_DEFAULT),
         recheck: document.getElementById(`${P}-recheck`).checked,
         skipOk: document.getElementById(`${P}-skipok`).checked,
         theme: panel && panel.getAttribute('data-theme') || 'dark',
@@ -3317,6 +3317,9 @@
     if (n < min) return { n: min, fixed: 'range' };
     if (n > max) return { n: max, fixed: 'range' };
     return { n, fixed: '' };
+  }
+  function storedBound(raw, min, max, fallback) {
+    return boundInt(parseInt(raw, 10), min, max, fallback).n;
   }
   function boundNote(got, okText, rangeText, emptyText) {
     if (!got || got.fixed === 'empty') return emptyText;
