@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.188
+// @version      2.2.189
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.188';
+  const VERSION = '2.2.189';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1539,9 +1539,15 @@
     return st === 'ok' ? '已删除' : st === 'fail' ? '未生效' : st === 'uncertain' ? '待确认' : '';
   }
 
+  function exportEmptyNote(total, filtered) {
+    const n = Number(total) || 0;
+    if (!n) return '列表是空的，没有可导出的评论。';
+    if (filtered) return `当前筛选下没有数据可导出。整份还有 ${n} 条。`;
+    return '没有可导出的评论。';
+  }
   function doExport(kind) {
     const list = visibleComments();
-    if (!list.length) { setStatus('当前筛选下没有数据可导出。'); return; }
+    if (!list.length) { setStatus(exportEmptyNote(comments.length, filtersOn())); return; }
     const stamped = list.map((c) => Object.assign({}, c, { state: stateLabel(c.rpid), why: journalWhy(c.rpid) }));
     const partial = filtersOn();
     const tag = partial ? '-part' : '';
