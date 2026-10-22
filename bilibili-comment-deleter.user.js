@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.195
+// @version      2.2.196
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.195';
+  const VERSION = '2.2.196';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -109,6 +109,14 @@
     return rm ? `${head}${h} 小时 ${rm} 分` : `${head}${h} 小时`;
   }
   function fmtEta(ms) { return fmtSpan(ms, true); }
+  function etaFloorNote(ms, recheckOn) {
+    const base = `预计 ${fmtEta(ms)}`;
+    if (!recheckOn) return `${base}。`;
+    return `${base}。这是下限，评论仍在时每次还会再等 ${SHADOW_WAIT / 1000} 秒。`;
+  }
+  function etaLeftNote(ms, recheckOn) {
+    return recheckOn ? `剩余至少 ${fmtEta(ms)}` : `剩余 ${fmtEta(ms)}`;
+  }
   function fmtDur(ms) { return fmtSpan(ms, false); }
   function fmtAgo(ms) {
     const n = Number(ms);
@@ -2942,7 +2950,7 @@
     }
     lockWhileDeleting(true);
     const kidNote = childNote(childCount(targets), recheckOn);
-    if (!(await ask(`即将删除 ${targets.length} 条（${scope}）。\n间隔 ${delay}ms，回查${recheckOn ? '开' : '关（受理不算已删）'}，预计 ${fmtEta(targets.length * per)}。${skipNote}${clashNote}${kidNote}${outside}\n首条：${sample}\n\n不可撤销。`, '删除'))) return;
+    if (!(await ask(`即将删除 ${targets.length} 条（${scope}）。\n间隔 ${delay}ms，回查${recheckOn ? '开' : '关（受理不算已删）'}，${etaFloorNote(targets.length * per, recheckOn)}${skipNote}${clashNote}${kidNote}${outside}\n首条：${sample}\n\n不可撤销。`, '删除'))) return;
 
     deleting = true; aborted = false;
     planned = targets.length;
@@ -2974,7 +2982,7 @@
         if (aborted) break;
         let j = null;
         try {
-          startBeat(() => `①删除 ${i + 1}/${targets.length} · ${snippet} · 请求中 · 已用 ${fmtDur(Date.now() - t0)} · 剩余 ${fmtEta(leftDel)}`);
+          startBeat(() => `①删除 ${i + 1}/${targets.length} · ${snippet} · 请求中 · 已用 ${fmtDur(Date.now() - t0)} · ${etaLeftNote(leftDel, recheckOn)}`);
           j = await doDelete(c, csrf);
         } catch (e) {
           result = 'uncertain';
@@ -3064,7 +3072,7 @@
         const snippet = takeChars(String(c.message || '(空)').replace(/\s+/g, ' '), 22, false);
         let v = null;
         try {
-          startBeat(() => `②回查 ${i + 1}/${pending.length} · ${snippet} · 请求中 · 已确认 ${ok} · 已用 ${fmtDur(Date.now() - t0)} · 剩余 ${fmtEta((pending.length - i) * 600)}`);
+          startBeat(() => `②回查 ${i + 1}/${pending.length} · ${snippet} · 请求中 · 已确认 ${ok} · 已用 ${fmtDur(Date.now() - t0)} · ${etaLeftNote((pending.length - i) * 600, true)}`);
           v = await recheckDefinitive(c);
         } catch (e) { v = { state: 'uncertain', why: e.message || '回查失败' }; }
         finally { stopBeat(); }
