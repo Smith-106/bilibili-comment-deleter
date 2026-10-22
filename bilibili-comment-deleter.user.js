@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.185
+// @version      2.2.186
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.185';
+  const VERSION = '2.2.186';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1867,13 +1867,18 @@
       const outside = outsideSelected();
       let n = 0;
       let skip = 0;
+      const skipOn = !!(document.getElementById(`${P}-skipok`) && document.getElementById(`${P}-skipok`).checked);
+      const jm = journalMap();
+      let skipOk = 0;
       visibleComments().forEach((c) => {
-        if (c.oid && c.type) { selected.add(c.rpid); n++; }
-        else skip++;
+        if (c.oid && c.type) {
+          selected.add(c.rpid);
+          n++;
+          if (skipOn && jm.get(idExact(c.rpid)) === 'ok') skipOk++;
+        } else skip++;
       });
       renderList(); updCount();
-      const skipNote = skip ? `有 ${skip} 条缺 oid 或类型，没勾。` : '';
-      say(outside ? `已勾选当前筛选 ${n} 条。筛选外还有 ${outside} 条，没有取消。${skipNote}` : `已勾选 ${n} 条。${skipNote}`);
+      say(selectAllNote(n, skip, outside, skipOn ? skipOk : 0));
     };
     $el(`${P}-selnone`).onclick = () => {
       const outside = outsideSelected();
@@ -2140,6 +2145,14 @@
     let n = 0;
     for (const id of selected) if (!visIds.has(id)) n++;
     return n;
+  }
+  function selectAllNote(picked, skipped, outside, skipOk) {
+    const head = outside
+      ? `已勾选当前筛选 ${picked} 条。筛选外还有 ${outside} 条，没有取消。`
+      : `已勾选 ${picked} 条。`;
+    const miss = skipped ? `有 ${skipped} 条缺 oid 或类型，没勾。` : '';
+    const done = skipOk ? `其中 ${skipOk} 条已确认删除，勾了跳过就不会再请求。` : '';
+    return `${head}${miss}${done}`;
   }
 
   function filtersOn() {
