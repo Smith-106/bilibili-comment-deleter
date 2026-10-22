@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.197
+// @version      2.2.198
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.197';
+  const VERSION = '2.2.198';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -114,7 +114,15 @@
     if (!recheckOn) return `${base}。`;
     return `${base}。这是下限，评论仍在时每次还会再等 ${SHADOW_WAIT / 1000} 秒。`;
   }
+  function etaRemain(baseMs, startedAt) {
+    const n = Number(baseMs);
+    if (!Number.isFinite(n)) return 0;
+    const spent = Date.now() - Number(startedAt);
+    if (!Number.isFinite(spent) || spent <= 0) return Math.max(0, n);
+    return Math.max(0, n - spent);
+  }
   function etaLeftNote(ms, recheckOn) {
+    if (!(ms > 0)) return recheckOn ? '已超过刚才的下限' : '已超过刚才的预计';
     return recheckOn ? `剩余至少 ${fmtEta(ms)}` : `剩余 ${fmtEta(ms)}`;
   }
   function fmtDur(ms) { return fmtSpan(ms, false); }
@@ -2983,7 +2991,8 @@
         if (aborted) break;
         let j = null;
         try {
-          startBeat(() => `①删除 ${i + 1}/${targets.length} · ${snippet} · 请求中 · 已用 ${fmtDur(Date.now() - t0)} · ${etaLeftNote(leftDel, recheckOn)}`);
+          const reqAt = Date.now();
+          startBeat(() => `①删除 ${i + 1}/${targets.length} · ${snippet} · 请求中 · 已用 ${fmtDur(Date.now() - t0)} · ${etaLeftNote(etaRemain(leftDel, reqAt), recheckOn)}`);
           j = await doDelete(c, csrf);
         } catch (e) {
           result = 'uncertain';
@@ -3073,7 +3082,8 @@
         const snippet = takeChars(String(c.message || '(空)').replace(/\s+/g, ' '), 22, false);
         let v = null;
         try {
-          startBeat(() => `②回查 ${i + 1}/${pending.length} · ${snippet} · 请求中 · 已确认 ${ok} · 已用 ${fmtDur(Date.now() - t0)} · ${etaLeftNote((pending.length - i) * 600, true)}`);
+          const reqAt = Date.now();
+          startBeat(() => `②回查 ${i + 1}/${pending.length} · ${snippet} · 请求中 · 已确认 ${ok} · 已用 ${fmtDur(Date.now() - t0)} · ${etaLeftNote(etaRemain((pending.length - i) * 600, reqAt), true)}`);
           v = await recheckDefinitive(c);
         } catch (e) { v = { state: 'uncertain', why: e.message || '回查失败' }; }
         finally { stopBeat(); }
