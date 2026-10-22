@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.183
+// @version      2.2.184
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.183';
+  const VERSION = '2.2.184';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1861,9 +1861,7 @@
       sortMode = $el(`${P}-sortsel`).value;
       saveSettings();
       renderList(); updCount();
-      const name = { default: '默认', tasc: '时间从早到晚', tdesc: '时间从晚到早' };
-      const dated = sortMode === 'default' ? '' : '没有时间的排在最后。';
-      say(`已按${name[sortMode] || '默认'}排序。${dated}换页之后还是这个顺序。当前 ${visibleComments().length} 条。`);
+      say(sortNote(sortMode, visibleComments().length, filterAside(filterBits(), '')));
     };
     $el(`${P}-selall`).onclick = () => {
       const outside = outsideSelected();
@@ -2589,19 +2587,26 @@
     say(`${text}，当前 ${visibleComments().length} 条。${aside}`);
   }
 
-  function keywordNote(q, n) {
+  function keywordNote(q, n, aside) {
     const query = String(q || '').trim();
     const count = `当前 ${Number(n) || 0} 条。`;
-    if (!query) return `已清除关键词。${count}`;
+    const rest = aside ? String(aside) : '';
+    if (!query) return `已清除关键词。${count}${rest}`;
     const idPart = [...query].length < 4 ? '编号不满 4 位要完全相等。' : '也搜 rpid 和 oid。';
-    return `已按「${query}」筛选，${count}正文和失败原因忽略空格和换行。${idPart}`;
+    return `已按「${query}」筛选，${count}正文和失败原因忽略空格和换行。${idPart}${rest}`;
+  }
+  function sortNote(mode, n, aside) {
+    const name = { default: '默认', tasc: '时间从早到晚', tdesc: '时间从晚到早' };
+    const dated = mode && mode !== 'default' ? '没有时间的排在最后。' : '';
+    const rest = aside ? String(aside) : '';
+    return `已按${name[mode] || '默认'}排序。${dated}换页之后还是这个顺序。当前 ${Number(n) || 0} 条。${rest}`;
   }
   function onFilter(live) {
     const next = document.getElementById(`${P}-kw`).value.trim();
     if (live && next === filterKw) return;
     filterKw = next;
     renderList();
-    say(keywordNote(filterKw, visibleComments().length));
+    say(keywordNote(filterKw, visibleComments().length, filterAside(filterBits(), filterKw ? '关键词' : '')));
   }
 
   function armStop(on) {
