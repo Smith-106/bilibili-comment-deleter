@@ -1,0 +1,12 @@
+.workflow/search-cache.json
+.workflow/kg/*.db
+.workflow/kg/*.db-journal
+.workflow/kg/*.db-wal
+.workflow/kg/*.db-shm
+node_modules/
+*.log
+*.tmp
+scrape-*.json
+candidates.json
+sample-verify.json
+smoke-panel.png

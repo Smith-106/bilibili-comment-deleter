@@ -6,6 +6,10 @@
 
 同 v2.1:Tampermonkey 新建脚本 → 粘贴全文 → 打开任意 `*.bilibili.com` 页面点右下角 🗑️。三源枚举:AICU 获取 / 官方历史扫描 / 离线 JSON 导入;关键词+来源+类型+时间排序四维筛选;删除前可 💾JSON/CSV 导出备份。
 
+- 安装地址: https://raw.githubusercontent.com/Smith-106/bilibili-comment-deleter/main/bilibili-comment-deleter.user.js
+- 文档站: https://smith-106.github.io/bilibili-comment-deleter/
+- 发布: https://github.com/Smith-106/bilibili-comment-deleter/releases/tag/v2.2.202
+
 ## v2.1 → v2.2 变更清单
 
 ### 性能
