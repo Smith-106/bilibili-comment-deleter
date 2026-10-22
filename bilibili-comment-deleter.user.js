@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.178
+// @version      2.2.179
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.178';
+  const VERSION = '2.2.179';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -3031,10 +3031,15 @@
       if (sel) sel.value = 'uncertain';
       focusNote = ' 列表已切到「待确认」。';
     } else if (unsent > 0) {
-      filtState = 'none';
-      const sel = document.getElementById(`${P}-statesel`);
-      if (sel) sel.value = 'none';
-      focusNote = ' 列表已切到「未处理」（这些还没请求）。';
+      const split = unsentSplit(targets.slice(seen), (c) => journalMap().get(idExact(c.rpid)));
+      if (split.marked) {
+        focusNote = ` 还有 ${unsent} 条没请求，其中 ${split.marked} 条本来就有处理记录，没有切到「未处理」，以免把它们藏起来。`;
+      } else {
+        filtState = 'none';
+        const sel = document.getElementById(`${P}-statesel`);
+        if (sel) sel.value = 'none';
+        focusNote = ' 列表已切到「未处理」（这些还没请求）。';
+      }
     }
     if (unsent && filtState !== 'none' && filtState !== 'all') {
       focusNote += `另有 ${unsent} 条还没请求，这个筛选里看不到。`;
@@ -3185,6 +3190,14 @@
     else setStatus(t);
   }
 
+  function unsentSplit(rows, stateOf) {
+    let fresh = 0, marked = 0;
+    for (const c of rows || []) {
+      if (stateOf(c)) marked++;
+      else fresh++;
+    }
+    return { fresh, marked };
+  }
   function digestCounts(rows, stateOf) {
     let ok = 0, bad = 0, nodeal = 0;
     for (const c of rows || []) {
