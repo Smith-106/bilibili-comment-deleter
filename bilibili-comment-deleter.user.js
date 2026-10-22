@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.190
+// @version      2.2.191
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.190';
+  const VERSION = '2.2.191';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -1961,7 +1961,9 @@
       try {
         await navigator.clipboard.writeText(text);
         const hidden = outsideCount(rows, visibleComments());
-        setStatus(`已复制 ${ids.length} 个未成功 rpid（每行后面是原因，没有原因就空着）${hidden ? `，其中 ${hidden} 条不在当前筛选里` : ''}。`);
+        let noPlace = 0;
+        for (const c of rows) if (!c.oid || !c.type) noPlace++;
+        setStatus(copyBadNote(ids.length, hidden, noPlace));
       } catch (e) {
         setStatus('复制失败。请允许剪贴板，或从日志里复制。');
         log(`未成功 rpid：${ids.join(',')}`, 'warn');
@@ -2537,6 +2539,11 @@
     if (!total) return prefix;
     if (hidden > 0) return `${prefix} (${total}，含筛选外)`;
     return `${prefix} (${total})`;
+  }
+  function copyBadNote(n, hidden, noPlace) {
+    const where = hidden ? `，其中 ${hidden} 条不在当前筛选里` : '';
+    const place = noPlace ? `。其中 ${noPlace} 条缺 oid 或类型，重试按钮不会带上` : '';
+    return `已复制 ${n} 个未成功 rpid（每行后面是原因，没有原因就空着）${where}${place}。`;
   }
   function countDeletable(list, skipOk, stateOf) {
     const rows = list || [];
