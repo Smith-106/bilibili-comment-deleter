@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站评论批量删除 v2.2（全面优化版）
 // @namespace    bilibili-comment-deleter
-// @version      2.2.187
+// @version      2.2.188
 // @description  三源枚举（AICU / 官方历史 / 离线JSON导入）+ 官方接口删除 + 单条官方回查（不信 code=0，影子失败自动重试）+ 全区/整楼兜底 + 分阶段进度反馈 + 统一请求层 + 处理日志持久化
 // @author       Smith-106 v2.0 / WorkBuddy v1.2 / SXM v1.1 + naaammme bilibili-tools 经验合并增强
 // @license      MIT
@@ -17,7 +17,7 @@
   'use strict';
 
   /* ═══════════ 常量 ═══════════ */
-  const VERSION = '2.2.187';
+  const VERSION = '2.2.188';
   const P = 'bcd22';                  // DOM 前缀
   const DELAY_DEFAULT = 400;          // 删除间隔默认 ms
   const AICU_PS = 500;                // AICU 每页条数
@@ -324,6 +324,20 @@
       else if (st === 'fail' || st === 'uncertain') bad++;
     }
     return { n: m.size, ok, bad };
+  }
+  function countOutsideIds(listIds, journalIds) {
+    const have = listIds instanceof Set ? listIds : new Set(listIds || []);
+    let n = 0;
+    for (const id of journalIds || []) if (!have.has(id)) n++;
+    return n;
+  }
+  function forgetAsk(st, outside) {
+    const extra = outside ? `\n其中 ${outside} 条不在当前列表里，也会清掉。` : '';
+    return `清除 ${st.n} 条本地处理记录？\n已确认 ${st.ok}，未成功 ${st.bad}。${extra}\n列表还在，但这些评论不再被当成已删除。`;
+  }
+  function forgetNote(st, outside) {
+    const extra = outside ? `其中 ${outside} 条当时不在当前列表里。` : '';
+    return `处理记录已清除 ${st.n} 条（已确认 ${st.ok}，未成功 ${st.bad}）。${extra}列表还在，这些评论不再被当成已删除。`;
   }
   function journalCompact(list) {
     const seen = new Set();
@@ -1905,12 +1919,18 @@
     $el(`${P}-forget`).onclick = async () => {
       const st = journalStats();
       if (!st.n) { setStatus('没有本地处理记录。'); return; }
-      if (!(await ask(`清除 ${st.n} 条本地处理记录？\n已确认 ${st.ok}，未成功 ${st.bad}。\n列表还在，但这些评论不再被当成已删除。`, '清除'))) return;
+      const listIds = new Set();
+      for (const c of comments) {
+        const id = idExact(c && c.rpid);
+        if (id) listIds.add(id);
+      }
+      const outside = countOutsideIds(listIds, journalMap().keys());
+      if (!(await ask(forgetAsk(st, outside), '清除'))) return;
       try { localStorage.removeItem(JKEY); } catch (e) { /* noop */ }
       journalMapCache = null; journalWhyCache = null;
       renderList();
       updCount();
-      setStatus('处理记录已清除。');
+      setStatus(forgetNote(st, outside));
       log('处理记录已清除', 'warn');
     };
 
